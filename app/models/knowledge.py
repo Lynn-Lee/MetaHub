@@ -1,0 +1,160 @@
+"""知识层元数据模型（DEV-TASKS T1.2）。
+
+这些表承载人工维护的业务语义，采集角色只能只读，不能覆盖。
+"""
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import BigInteger, Boolean, Computed, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.schema import UniqueConstraint
+
+from app.db.base import KNOWLEDGE_TABLES, Base
+
+
+class BusinessDomain(Base):
+    __tablename__ = "business_domain"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("business_domain.id"))
+    code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None]
+    owner_id: Mapped[int | None] = mapped_column(BigInteger)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DomainRule(Base):
+    __tablename__ = "domain_rule"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    domain_id: Mapped[int] = mapped_column(ForeignKey("business_domain.id"), nullable=False)
+    source_id: Mapped[int | None] = mapped_column(BigInteger)
+    db_pattern: Mapped[str | None] = mapped_column(String(128))
+    table_pattern: Mapped[str | None] = mapped_column(String(128))
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Tag(Base):
+    __tablename__ = "tag"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None]
+    color: Mapped[str | None] = mapped_column(String(16))
+    exclusive: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    __table_args__ = (UniqueConstraint("category", "code", name="uq_tag_category_code"),)
+
+
+class Dictionary(Base):
+    __tablename__ = "dict"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None]
+    items: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), default="MANUAL")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AssetAnnotation(Base):
+    __tablename__ = "asset_annotation"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    urn: Mapped[str] = mapped_column(String(768), unique=True, nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    domain_id: Mapped[int | None] = mapped_column(ForeignKey("business_domain.id"))
+    business_meaning: Mapped[str | None]
+    logical_type_override: Mapped[str | None] = mapped_column(String(32))
+    dict_id: Mapped[int | None] = mapped_column(ForeignKey("dict.id"))
+    dict_inline: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    sample_value: Mapped[str | None]
+    source_desc: Mapped[str | None]
+    usage_note: Mapped[str | None]
+    owner_id: Mapped[int | None] = mapped_column(BigInteger)
+    lifecycle: Mapped[str] = mapped_column(String(16), default="ACTIVE")
+    status: Mapped[str] = mapped_column(String(16), default="CONFIRMED")
+    source_type: Mapped[str] = mapped_column(String(16), default="MANUAL")
+    inherited_from: Mapped[str | None] = mapped_column(String(768))
+    search_text: Mapped[str] = mapped_column(
+        Computed(
+            "coalesce(business_meaning,'') || ' ' || "
+            "coalesce(usage_note,'') || ' ' || "
+            "coalesce(source_desc,'')",
+            persisted=True,
+        )
+    )
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("idx_annotation_domain", "domain_id"),
+        Index("idx_annotation_status", "status", "source_type"),
+    )
+
+
+class AssetTagRel(Base):
+    __tablename__ = "asset_tag_rel"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    urn: Mapped[str] = mapped_column(String(768), nullable=False)
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tag.id"), nullable=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("urn", "tag_id", name="uq_asset_tag_rel_urn_tag_id"),
+        Index("idx_asset_tag_tag", "tag_id"),
+    )
+
+
+class AnnotationHistory(Base):
+    __tablename__ = "annotation_history"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    urn: Mapped[str] = mapped_column(String(768), nullable=False)
+    before_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    after_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    operator_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("idx_anno_hist_urn", "urn", "created_at"),)
+
+
+class CommonColumnBlacklist(Base):
+    __tablename__ = "common_column_blacklist"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    column_name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    reason: Mapped[str | None]
+    is_whitelist: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+KNOWLEDGE_TABLES.update(
+    {
+        "business_domain",
+        "domain_rule",
+        "tag",
+        "dict",
+        "asset_annotation",
+        "asset_tag_rel",
+        "annotation_history",
+        "common_column_blacklist",
+    }
+)
