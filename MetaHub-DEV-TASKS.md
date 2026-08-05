@@ -194,6 +194,12 @@ PRD §8 定的 V0.1 周期是 **3~4 周**（15~20 工作日）。要在 4 周内
 6. 产出去重率实测数据，并据此填定 V0.5 验收标准
 7. 产出检索阈值调优报告，阈值已写入迁移
 
+### V0.1 开发执行记录
+
+| 日期 | 任务 | 状态 | 交付内容 | 验证 |
+|---|---|---|---|---|
+| 2026-08-05 | T1.3 支撑层表 | 已完成 | 新增 `schema_change_log` / `sync_job_log` / `sync_fail_detail` / `view_log` / `search_log` / `search_click` / `annotation_todo` / `sys_user` / `user_role` / `api_key` / `user_favorite` / `feedback` ORM 与 Alembic 迁移；`annotation_todo` 使用部分唯一索引 `UNIQUE(urn,todo_type) WHERE status='OPEN'`；修正 Alembic asyncpg 在线迁移路径与本地迁移账号。 | `pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`、`alembic upgrade head --sql`、本地 PostgreSQL `upgrade -> downgrade 20260805_0002 -> upgrade` |
+
 ---
 
 ## 3. V0.5 — 标注提效（约 4~5 周）
