@@ -200,6 +200,7 @@ PRD §8 定的 V0.1 周期是 **3~4 周**（15~20 工作日）。要在 4 周内
 |---|---|---|---|---|
 | 2026-08-05 | T1.3 支撑层表 | 已完成 | 新增 `schema_change_log` / `sync_job_log` / `sync_fail_detail` / `view_log` / `search_log` / `search_click` / `annotation_todo` / `sys_user` / `user_role` / `api_key` / `user_favorite` / `feedback` ORM 与 Alembic 迁移；`annotation_todo` 使用部分唯一索引 `UNIQUE(urn,todo_type) WHERE status='OPEN'`；修正 Alembic asyncpg 在线迁移路径与本地迁移账号。 | `pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`、`alembic upgrade head --sql`、本地 PostgreSQL `upgrade -> downgrade 20260805_0002 -> upgrade` |
 | 2026-08-06 | T1.4 `v_column_effective` 视图 | 已完成 | 新增 `v_column_effective` Alembic 迁移；通过 `COALESCE(ca.domain_id, ta.domain_id)` 与 `COALESCE(ca.owner_id, ta.owner_id)` 统一字段有效域/负责人；`is_deleted` 作为普通列暴露，视图内不做硬过滤。 | `pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`、`alembic upgrade head --sql`、本地 PostgreSQL fixture readback 验证 `is_deleted=TRUE` 可查且字段继承表级域/负责人、`downgrade 20260805_0003 -> upgrade head` |
+| 2026-08-06 | T1.5 授权脚本 | 已完成 | 新增幂等 `deploy/grants.sql`；Web 角色全表读写并设置默认权限；Collector 角色对采集层和采集流程支撑表可写、对知识层只读且显式收回写权限；Alembic 在线迁移完成后自动重跑授权脚本。 | `pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`、`alembic upgrade head --sql`、本地 PostgreSQL `upgrade head` 后 Collector 分层权限 readback、Web 新建测试表默认权限验证 |
 
 ---
 
