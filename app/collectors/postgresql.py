@@ -166,20 +166,26 @@ class PostgreSQLCollector(BaseCollector):
         ]
 
     async def _fetch_all(self, sql: str, *params: Any) -> list[Row]:
-        connection = await self._connect()
-        try:
-            rows = await connection.fetch(sql, *params)
-            return [dict(row) for row in rows]
-        finally:
-            await connection.close()
+        async def operation() -> list[Row]:
+            connection = await self._connect()
+            try:
+                rows = await connection.fetch(sql, *params)
+                return [dict(row) for row in rows]
+            finally:
+                await connection.close()
+
+        return await self._run_limited_query(operation)
 
     async def _fetch_one(self, sql: str, *params: Any) -> Row | None:
-        connection = await self._connect()
-        try:
-            row = await connection.fetchrow(sql, *params)
-            return dict(row) if row is not None else None
-        finally:
-            await connection.close()
+        async def operation() -> Row | None:
+            connection = await self._connect()
+            try:
+                row = await connection.fetchrow(sql, *params)
+                return dict(row) if row is not None else None
+            finally:
+                await connection.close()
+
+        return await self._run_limited_query(operation)
 
     async def _connect(self) -> Any:
         return await asyncpg.connect(

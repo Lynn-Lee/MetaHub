@@ -139,10 +139,14 @@ class MySQLCollector(BaseCollector):
         ]
 
     async def _fetch_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[Row]:
-        return await asyncio.to_thread(self._fetch_all_sync, sql, params)
+        return await self._run_limited_query(
+            lambda: asyncio.to_thread(self._fetch_all_sync, sql, params)
+        )
 
     async def _fetch_one(self, sql: str, params: tuple[Any, ...] = ()) -> Row | None:
-        return await asyncio.to_thread(self._fetch_one_sync, sql, params)
+        return await self._run_limited_query(
+            lambda: asyncio.to_thread(self._fetch_one_sync, sql, params)
+        )
 
     def _fetch_all_sync(self, sql: str, params: tuple[Any, ...]) -> list[Row]:
         with self._connect() as connection:

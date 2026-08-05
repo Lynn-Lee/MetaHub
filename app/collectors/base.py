@@ -1,9 +1,13 @@
+import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, TypeVar
 
 from app.collectors.type_mapper import normalize_column_type
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +22,9 @@ class DataSourceConfig:
     default_db: str | None = None
     include_rules: list[dict[str, Any]] = field(default_factory=list)
     exclude_rules: list[dict[str, Any]] = field(default_factory=list)
+    max_query_concurrency: int = 1
+    min_query_interval_seconds: float = 0.1
+    query_timeout_seconds: float = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +78,9 @@ class BaseCollector(ABC):
 
     def __init__(self, config: DataSourceConfig):
         self.config = config
+        self._query_semaphore = asyncio.Semaphore(max(1, config.max_query_concurrency))
+        self._query_rate_lock = asyncio.Lock()
+        self._last_query_started_at = 0.0
 
     @abstractmethod
     async def test_connection(self) -> bool: ...
@@ -91,3 +101,22 @@ class BaseCollector(ABC):
 
     def normalize_type(self, raw_type: str) -> str:
         return normalize_column_type(self.config.db_type, raw_type)
+
+    async def _run_limited_query(self, operation: Callable[[], Awaitable[T]]) -> T:
+        async with self._query_semaphore:
+            await self._wait_for_query_slot()
+            return await asyncio.wait_for(operation(), timeout=self.config.query_timeout_seconds)
+
+    async def _wait_for_query_slot(self) -> None:
+        min_interval = max(0.0, self.config.min_query_interval_seconds)
+        if min_interval == 0:
+            return
+
+        async with self._query_rate_lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            elapsed = now - self._last_query_started_at
+            if elapsed < min_interval:
+                await asyncio.sleep(min_interval - elapsed)
+                now = loop.time()
+            self._last_query_started_at = now
