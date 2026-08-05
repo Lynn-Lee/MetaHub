@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from app.collectors.type_mapper import normalize_column_type
@@ -30,6 +31,10 @@ class TableInfo:
     table_name: str
     table_type: str
     table_comment: str | None = None
+    engine: str | None = None
+    row_count: int | None = None
+    data_size: int | None = None
+    db_created_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,7 @@ class IndexInfo:
     index_name: str
     columns: list[str]
     index_type: str | None = None
+    is_unique: bool = False
 
 
 class BaseCollector(ABC):

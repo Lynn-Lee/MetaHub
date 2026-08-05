@@ -203,6 +203,7 @@ PRD §8 定的 V0.1 周期是 **3~4 周**（15~20 工作日）。要在 4 周内
 | 2026-08-06 | T1.5 授权脚本 | 已完成 | 新增幂等 `deploy/grants.sql`；Web 角色全表读写并设置默认权限；Collector 角色对采集层和采集流程支撑表可写、对知识层只读且显式收回写权限；Alembic 在线迁移完成后自动重跑授权脚本。 | `pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`、`alembic upgrade head --sql`、本地 PostgreSQL `upgrade head` 后 Collector 分层权限 readback、Web 新建测试表默认权限验证 |
 | 2026-08-06 | T1.6 检索阈值配置 | 已完成 | 新增 Alembic 迁移 `20260806_0005_search_similarity_threshold.py`，数据库级执行 `ALTER DATABASE metahub SET pg_trgm.similarity_threshold = 0.1`；回滚时 `RESET` 数据库级配置；新增迁移契约测试，防止退回应用会话级 `SET`。 | `pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`、`alembic upgrade head --sql`、本地 PostgreSQL `upgrade head` 后 `SELECT version_num` 为 `20260806_0005` 且新连接 `SHOW pg_trgm.similarity_threshold` 返回 `0.1`、`downgrade 20260806_0004 -> upgrade head` |
 | 2026-08-06 | T2.1 采集器框架 | 已完成 | 新增 `BaseCollector` 抽象、`DataSourceConfig` / `DatabaseInfo` / `TableInfo` / `ColumnInfo` / `IndexInfo` 采集 DTO、采集器注册表与 PRD §M2 类型归一映射；新增库可通过实现一个采集器类并调用 `register_collector()` 接入，框架无需改动。 | 红灯：`pytest -q tests/collectors/test_collector_framework.py` 因 `BaseCollector` 未导出失败；绿灯：`pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app` |
+| 2026-08-06 | T2.2 MySQL 采集器 | 已完成 | 新增 `MySQLCollector` 并注册 `mysql`；通过 `information_schema.schemata` / `tables` / `columns` / `statistics` 批量读取库、表、字段、索引元数据；表注释走 `tables.table_comment`，字段注释走 `columns.column_comment`，字段类型接入 `type_mapper` 归一。 | 红灯：`pytest -q tests/collectors/test_mysql_collector.py` 因 `app.collectors.mysql` 不存在失败；绿灯：`pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`；focused test 断言表/字段/索引列表方法每次仅执行 1 条整库 `information_schema` 查询 |
 
 ---
 
@@ -340,5 +341,5 @@ Doris & StarRocks & ClickHouse & Hive 采集器、数仓分层识别、字段名
 
 **第 2 周**
 - [x] T1.4 ~ T1.6 视图、授权脚本、阈值配置落地
-- [ ] T2.1 ~ T2.2 采集器框架 + MySQL 采集器
+- [x] T2.1 ~ T2.2 采集器框架 + MySQL 采集器
 - [ ] 只读账号到位后立即跑 T9.1 注释覆盖率摸底——**这个结果影响 V0.5 范围，越早越好**
