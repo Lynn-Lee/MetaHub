@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # 与本地/生产一致：需要 pgvector，pg_trgm 随 PostgreSQL 自带
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: metahub
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    env:
+      DB_URL_WEB: postgresql+asyncpg://metahub_web:ci@localhost:5432/metahub
+      DB_URL_COLLECTOR: postgresql+asyncpg://metahub_collector:ci@localhost:5432/metahub
+      REDIS_URL: redis://localhost:6379/0
+      CREDENTIAL_SECRET_KEY: ci_only_secret_key_at_least_32_chars_long
+      JWT_SECRET_KEY: ci_only_jwt_secret_key_at_least_32_chars
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: 初始化数据库角色与扩展
+        run: |
+          export PGPASSWORD=postgres
+          psql -h localhost -U postgres -d metahub -v ON_ERROR_STOP=1 <<'SQL'
+            CREATE EXTENSION IF NOT EXISTS pg_trgm;
+            CREATE EXTENSION IF NOT EXISTS vector;
+            ALTER DATABASE metahub SET pg_trgm.similarity_threshold = 0.1;
+            CREATE ROLE metahub_web LOGIN PASSWORD 'ci';
+            CREATE ROLE metahub_collector LOGIN PASSWORD 'ci';
+            GRANT CONNECT ON DATABASE metahub TO metahub_web, metahub_collector;
+            GRANT USAGE ON SCHEMA public TO metahub_web, metahub_collector;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public
+              GRANT ALL ON TABLES TO metahub_web;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public
+              GRANT USAGE, SELECT ON SEQUENCES TO metahub_web;
+          SQL
+
+      - name: Lint
+        run: ruff check app tests
+
+      - name: Format check
+        run: ruff format --check app tests
+
+      - name: Typecheck
+        run: mypy app
+
+      - name: Test
+        run: pytest -v --strict-markers
+
+      # ── 质量门禁（DEV-TASKS §6）───────────────────────────
+      # 这些测试不允许 skip：G1 注释静默丢失、G2/G3 采集角色权限。
+      # 随对应任务（T2.4 / T8.3）实现后，下面这步会真正生效。
+      - name: 质量门禁
+        run: ./scripts/run-gate-tests.sh
