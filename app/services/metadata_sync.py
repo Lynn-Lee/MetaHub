@@ -1,0 +1,492 @@
+"""元数据同步主流程（DEV-TASKS T3.1）。
+
+本模块只负责 T3.1 的同步骨架：凭证解密、同源互斥、白/黑名单过滤、
+批量采集层 upsert 与幂等提交。变更 diff、软删除、执行日志和告警分别留给
+T3.2、T3.3、T3.4。
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import hashlib
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Protocol, cast
+from uuid import uuid4
+
+from cryptography.fernet import Fernet
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert
+
+from app.collectors import BaseCollector, DataSourceConfig, get_collector
+from app.core.config import get_settings
+from app.db.session import collector_session
+from app.models.metadata import ColumnMeta, DataSource, IndexMeta, TableMeta
+
+
+class SyncSession(Protocol):
+    async def get(self, entity: type[DataSource], ident: int) -> DataSource | None: ...
+
+    async def execute(self, statement: object, parameters: dict[str, Any] | None = None) -> Any: ...
+
+    async def scalar(self, statement: object, parameters: dict[str, Any] | None = None) -> Any: ...
+
+    async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
+
+
+class SourceLock(Protocol):
+    async def acquire(self, session: SyncSession, source_id: int) -> bool: ...
+
+    async def release(self, session: SyncSession, source_id: int) -> None: ...
+
+
+class MetadataWriter(Protocol):
+    async def write_snapshot(
+        self,
+        session: SyncSession,
+        *,
+        tables: list[dict[str, Any]],
+        columns: list[dict[str, Any]],
+        indexes: list[dict[str, Any]],
+    ) -> None: ...
+
+
+class RedisClient(Protocol):
+    async def set(self, name: str, value: str, *, ex: int, nx: bool) -> Any: ...
+
+    async def get(self, name: str) -> Any: ...
+
+    async def delete(self, name: str) -> Any: ...
+
+
+CollectorFactory = Callable[[str, DataSourceConfig], BaseCollector]
+CredentialDecrypter = Callable[[str], str]
+SessionFactory = Callable[[], AbstractAsyncContextManager[SyncSession]]
+
+
+@dataclass(frozen=True, slots=True)
+class SyncResult:
+    source_id: int
+    status: str
+    scanned_databases: int = 0
+    scanned_tables: int = 0
+    scanned_columns: int = 0
+    scanned_indexes: int = 0
+
+
+class InMemorySourceLock:
+    """测试和单进程开发用锁；生产路径使用 RedisPostgresSourceLock。"""
+
+    def __init__(self) -> None:
+        self._locked: set[int] = set()
+
+    async def acquire(self, session: SyncSession, source_id: int) -> bool:
+        del session
+        if source_id in self._locked:
+            return False
+        self._locked.add(source_id)
+        return True
+
+    async def release(self, session: SyncSession, source_id: int) -> None:
+        del session
+        self._locked.discard(source_id)
+
+
+class RedisPostgresSourceLock:
+    """Redis 分布式锁 + PostgreSQL advisory lock 双保险。"""
+
+    def __init__(self, *, redis_client: RedisClient | None = None, ttl_seconds: int = 3600):
+        self._redis = redis_client
+        self._ttl_seconds = ttl_seconds
+        self._tokens: dict[int, str] = {}
+
+    async def acquire(self, session: SyncSession, source_id: int) -> bool:
+        token = uuid4().hex
+        redis_key = _redis_key(source_id)
+        if self._redis is not None:
+            acquired = await self._redis.set(redis_key, token, ex=self._ttl_seconds, nx=True)
+            if not bool(acquired):
+                return False
+            self._tokens[source_id] = token
+
+        lock_key = _advisory_lock_key(source_id)
+        pg_acquired = await session.scalar(
+            text("SELECT pg_try_advisory_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
+        if bool(pg_acquired):
+            return True
+
+        await self._release_redis_if_owned(source_id)
+        return False
+
+    async def release(self, session: SyncSession, source_id: int) -> None:
+        await session.execute(
+            text("SELECT pg_advisory_unlock(:lock_key)"),
+            {"lock_key": _advisory_lock_key(source_id)},
+        )
+        await self._release_redis_if_owned(source_id)
+
+    async def _release_redis_if_owned(self, source_id: int) -> None:
+        if self._redis is None:
+            return
+        token = self._tokens.pop(source_id, None)
+        if token is None:
+            return
+        current = await self._redis.get(_redis_key(source_id))
+        if _decode_redis_value(current) == token:
+            await self._redis.delete(_redis_key(source_id))
+
+
+class SQLAlchemyMetadataWriter:
+    def __init__(self, *, batch_size: int):
+        self._batch_size = max(1, batch_size)
+
+    async def write_snapshot(
+        self,
+        session: SyncSession,
+        *,
+        tables: list[dict[str, Any]],
+        columns: list[dict[str, Any]],
+        indexes: list[dict[str, Any]],
+    ) -> None:
+        await self._upsert_batches(
+            session,
+            TableMeta,
+            rows=tables,
+            conflict_columns=("urn",),
+            update_columns=(
+                "source_id",
+                "db_name",
+                "table_name",
+                "table_type",
+                "table_comment",
+                "engine",
+                "row_count",
+                "data_size",
+                "db_created_at",
+                "is_deleted",
+                "deleted_at",
+                "synced_at",
+            ),
+        )
+        await self._upsert_batches(
+            session,
+            ColumnMeta,
+            rows=columns,
+            conflict_columns=("urn",),
+            update_columns=(
+                "table_urn",
+                "column_name",
+                "ordinal",
+                "raw_type",
+                "logical_type",
+                "data_length",
+                "num_precision",
+                "num_scale",
+                "is_nullable",
+                "default_value",
+                "raw_comment",
+                "is_primary_key",
+                "is_auto_incr",
+                "is_unique",
+                "is_partition_key",
+                "is_deleted",
+                "deleted_at",
+                "synced_at",
+            ),
+        )
+        await self._upsert_batches(
+            session,
+            IndexMeta,
+            rows=indexes,
+            conflict_columns=("table_urn", "index_name"),
+            update_columns=("index_type", "columns", "synced_at"),
+        )
+
+    async def _upsert_batches(
+        self,
+        session: SyncSession,
+        model: type[TableMeta] | type[ColumnMeta] | type[IndexMeta],
+        *,
+        rows: list[dict[str, Any]],
+        conflict_columns: Sequence[str],
+        update_columns: Sequence[str],
+    ) -> None:
+        for batch in _chunked(rows, self._batch_size):
+            statement = insert(model).values(batch)
+            update_values = {
+                column: getattr(statement.excluded, column) for column in update_columns
+            }
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=list(conflict_columns),
+                    set_=update_values,
+                )
+            )
+
+
+class MetadataSyncService:
+    def __init__(
+        self,
+        *,
+        session_factory: SessionFactory | None = None,
+        collector_factory: CollectorFactory = get_collector,
+        credential_decrypter: CredentialDecrypter | None = None,
+        lock: SourceLock | None = None,
+        writer: MetadataWriter | None = None,
+        batch_size: int | None = None,
+    ):
+        settings = get_settings()
+        effective_batch_size = batch_size or settings.SYNC_BATCH_SIZE
+        self._session_factory = session_factory or cast(SessionFactory, collector_session)
+        self._collector_factory = collector_factory
+        self._credential_decrypter = credential_decrypter or _decrypt_credential
+        self._lock = lock or RedisPostgresSourceLock(ttl_seconds=settings.SYNC_LOCK_TTL_SECONDS)
+        self._writer = writer or SQLAlchemyMetadataWriter(batch_size=effective_batch_size)
+        self._batch_size = effective_batch_size
+
+    async def sync_source(self, source_id: int) -> SyncResult:
+        async with self._session_factory() as session:
+            source = await session.get(DataSource, source_id)
+            if source is None or not source.enabled:
+                return SyncResult(source_id=source_id, status="SKIPPED")
+
+            acquired = await self._lock.acquire(session, source.id)
+            if not acquired:
+                return SyncResult(source_id=source_id, status="SKIPPED_LOCKED")
+
+            try:
+                result = await self._collect_and_write(session, source)
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await self._lock.release(session, source.id)
+
+    async def _collect_and_write(self, session: SyncSession, source: DataSource) -> SyncResult:
+        collector = self._collector_factory(
+            source.db_type,
+            DataSourceConfig(
+                source_id=source.id,
+                code=source.code,
+                db_type=source.db_type,
+                host=source.host,
+                port=source.port,
+                username=source.username,
+                password=self._credential_decrypter(source.password_cipher),
+                default_db=source.default_db,
+                include_rules=source.include_rules or [],
+                exclude_rules=source.exclude_rules or [],
+            ),
+        )
+        now = datetime.now(UTC)
+        databases = [
+            database
+            for database in await collector.list_databases()
+            if _matches_scope(
+                database.name,
+                None,
+                source.include_rules or [],
+                source.exclude_rules or [],
+            )
+        ]
+        table_rows: list[dict[str, Any]] = []
+        column_rows: list[dict[str, Any]] = []
+        index_rows: list[dict[str, Any]] = []
+
+        for database in databases:
+            table_infos = [
+                table
+                for table in await collector.list_tables(database.name)
+                if _matches_scope(
+                    table.db_name,
+                    table.table_name,
+                    source.include_rules or [],
+                    source.exclude_rules or [],
+                )
+            ]
+            table_urns = {
+                (table.db_name, table.table_name): _table_urn(
+                    source,
+                    table.db_name,
+                    table.table_name,
+                )
+                for table in table_infos
+            }
+            table_rows.extend(
+                {
+                    "urn": table_urns[(table.db_name, table.table_name)],
+                    "source_id": source.id,
+                    "db_name": table.db_name,
+                    "table_name": table.table_name,
+                    "table_type": table.table_type,
+                    "table_comment": table.table_comment,
+                    "engine": table.engine,
+                    "row_count": table.row_count,
+                    "data_size": table.data_size,
+                    "db_created_at": table.db_created_at,
+                    "is_deleted": False,
+                    "deleted_at": None,
+                    "synced_at": now,
+                }
+                for table in table_infos
+            )
+
+            column_rows.extend(
+                _column_row(column, table_urns[(column.db_name, column.table_name)], now)
+                for column in await collector.list_columns(database.name)
+                if (column.db_name, column.table_name) in table_urns
+            )
+            index_rows.extend(
+                _index_row(index, table_urns[(index.db_name, index.table_name)], now)
+                for index in await collector.list_indexes(database.name)
+                if (index.db_name, index.table_name) in table_urns
+            )
+
+        await self._writer.write_snapshot(
+            session,
+            tables=table_rows,
+            columns=column_rows,
+            indexes=index_rows,
+        )
+        return SyncResult(
+            source_id=source.id,
+            status="SUCCESS",
+            scanned_databases=len(databases),
+            scanned_tables=len(table_rows),
+            scanned_columns=len(column_rows),
+            scanned_indexes=len(index_rows),
+        )
+
+
+def _column_row(
+    column: Any,
+    table_urn: str,
+    synced_at: datetime,
+) -> dict[str, Any]:
+    return {
+        "urn": f"{table_urn}:{_urn_part(column.column_name)}",
+        "table_urn": table_urn,
+        "column_name": column.column_name,
+        "ordinal": column.ordinal,
+        "raw_type": column.raw_type,
+        "logical_type": column.logical_type,
+        "data_length": column.data_length,
+        "num_precision": column.num_precision,
+        "num_scale": column.num_scale,
+        "is_nullable": column.is_nullable,
+        "default_value": column.default_value,
+        "raw_comment": column.raw_comment,
+        "is_primary_key": column.is_primary_key,
+        "is_auto_incr": column.is_auto_incr,
+        "is_unique": column.is_unique,
+        "is_partition_key": False,
+        "is_deleted": False,
+        "deleted_at": None,
+        "synced_at": synced_at,
+    }
+
+
+def _index_row(index: Any, table_urn: str, synced_at: datetime) -> dict[str, Any]:
+    return {
+        "table_urn": table_urn,
+        "index_name": index.index_name,
+        "index_type": index.index_type,
+        "columns": [
+            {"name": column_name, "ordinal": ordinal}
+            for ordinal, column_name in enumerate(index.columns, start=1)
+        ],
+        "synced_at": synced_at,
+    }
+
+
+def _table_urn(source: DataSource, db_name: str, table_name: str) -> str:
+    return ":".join(
+        (
+            _urn_part(source.db_type),
+            _urn_part(source.code),
+            _urn_part(db_name),
+            _urn_part(table_name),
+        )
+    )
+
+
+def _urn_part(value: str) -> str:
+    return value.strip().lower().replace(":", r"\:")
+
+
+def _matches_scope(
+    db_name: str,
+    table_name: str | None,
+    include_rules: Iterable[dict[str, Any]],
+    exclude_rules: Iterable[dict[str, Any]],
+) -> bool:
+    include_rules_list = list(include_rules)
+    exclude_rules_list = list(exclude_rules)
+    if table_name is None:
+        included = not include_rules_list or any(
+            _matches_database_rule(rule, db_name) for rule in include_rules_list
+        )
+        if not included:
+            return False
+        return not any(
+            _matches_database_rule(rule, db_name)
+            for rule in exclude_rules_list
+            if "table" not in rule
+        )
+
+    included = not include_rules_list or any(
+        _matches_rule(rule, db_name, table_name) for rule in include_rules_list
+    )
+    if not included:
+        return False
+    return not any(_matches_rule(rule, db_name, table_name) for rule in exclude_rules_list)
+
+
+def _matches_database_rule(rule: dict[str, Any], db_name: str) -> bool:
+    db_pattern = str(rule.get("db") or rule.get("database") or rule.get("schema") or "*")
+    return fnmatch.fnmatchcase(db_name, db_pattern)
+
+
+def _matches_rule(rule: dict[str, Any], db_name: str, table_name: str | None) -> bool:
+    db_pattern = str(rule.get("db") or rule.get("database") or rule.get("schema") or "*")
+    table_pattern_value = rule.get("table")
+    if not fnmatch.fnmatchcase(db_name, db_pattern):
+        return False
+    if table_pattern_value is None:
+        return table_name is None or "table" not in rule
+    return table_name is not None and fnmatch.fnmatchcase(table_name, str(table_pattern_value))
+
+
+def _chunked(rows: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:
+    for start in range(0, len(rows), size):
+        yield rows[start : start + size]
+
+
+def _advisory_lock_key(source_id: int) -> int:
+    digest = hashlib.blake2b(f"metahub-sync:{source_id}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def _redis_key(source_id: int) -> str:
+    return f"metahub:sync:source:{source_id}"
+
+
+def _decode_redis_value(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode()
+    return str(value)
+
+
+def _decrypt_credential(cipher_text: str) -> str:
+    key = get_settings().CREDENTIAL_SECRET_KEY.encode()
+    return Fernet(key).decrypt(cipher_text.encode()).decode()
