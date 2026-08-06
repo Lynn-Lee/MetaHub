@@ -115,6 +115,27 @@ class RecordingWriter:
         self.index_names.extend(str(row["index_name"]) for row in indexes)
 
 
+class RecordingChangeLogger:
+    def __init__(self) -> None:
+        self.calls: list[
+            tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]
+        ] = []
+
+    async def detect_and_log(
+        self,
+        session: object,
+        *,
+        source_id: int,
+        tables: list[dict[str, Any]],
+        columns: list[dict[str, Any]],
+        indexes: list[dict[str, Any]],
+        detected_at: datetime,
+    ) -> int:
+        del session, source_id, detected_at
+        self.calls.append((tables, columns, indexes))
+        return 1
+
+
 class FakeSession:
     def __init__(self, source: DataSource):
         self._source = source
@@ -211,6 +232,7 @@ async def test_sync_source_filters_scope_decrypts_credentials_and_upserts_snapsh
     source = _source()
     session = FakeSession(source)
     writer = RecordingWriter()
+    change_logger = RecordingChangeLogger()
     started_passwords: list[str] = []
     service = MetadataSyncService(
         session_factory=lambda: _session_factory(session),
@@ -218,6 +240,7 @@ async def test_sync_source_filters_scope_decrypts_credentials_and_upserts_snapsh
         credential_decrypter=lambda cipher: f"plain:{cipher}",
         lock=InMemorySourceLock(),
         writer=writer,
+        change_logger=change_logger,
         batch_size=1,
     )
 
@@ -230,6 +253,8 @@ async def test_sync_source_filters_scope_decrypts_credentials_and_upserts_snapsh
     assert writer.table_urns == ["mysql:crm:sales:orders"]
     assert writer.column_urns == ["mysql:crm:sales:orders:pay_amount"]
     assert writer.index_names == ["idx_orders_pay_amount"]
+    assert result.changed_count == 1
+    assert change_logger.calls[0][0][0]["urn"] == "mysql:crm:sales:orders"
     assert session.commits == 1
 
 
@@ -264,6 +289,7 @@ async def test_sync_source_keeps_databases_when_include_rule_is_table_only() -> 
         credential_decrypter=lambda cipher: cipher,
         lock=InMemorySourceLock(),
         writer=writer,
+        change_logger=RecordingChangeLogger(),
     )
 
     result = await service.sync_source(source.id)

@@ -208,6 +208,7 @@ PRD §8 定的 V0.1 周期是 **3~4 周**（15~20 工作日）。要在 4 周内
 | 2026-08-06 | T2.4 注释断言测试 | 已完成 | 新增 `test_comment_not_all_empty` gate 测试，参数化覆盖 MySQL / PostgreSQL 带中文注释 fixture；断言采集字段非空、注释非空且含中文字符；新增契约测试确保该 gate 测试存在并带 `@pytest.mark.gate`。 | 红灯：`pytest -q tests/collectors/test_comment_gate_contract.py` 因 `test_comment_assertions.py` 不存在失败；绿灯：`./scripts/run-gate-tests.sh`、`pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app` |
 | 2026-08-06 | T2.5 限流与熔断 | 已完成 | 在 `BaseCollector` 增加统一查询 guard；`DataSourceConfig` 新增 `max_query_concurrency`、`min_query_interval_seconds`、`query_timeout_seconds`，默认最小查询间隔 `0.1s` 对应单采集器最多约 10 QPS；MySQL / PostgreSQL fetch 路径统一走并发 semaphore、最小间隔等待与 `asyncio.wait_for()` 超时熔断。 | 红灯：`pytest -q tests/collectors/test_query_limits.py` 因 `DataSourceConfig` 不支持限流字段失败；绿灯：`./scripts/run-gate-tests.sh`、`pytest -v`、`ruff check app tests alembic`、`ruff format --check app tests alembic`、`mypy app`；focused test 覆盖并发上限、最小查询间隔、超时熔断与 MySQL/PostgreSQL fetch 使用 guard |
 | 2026-08-06 | T3.1 同步主流程 | 已完成 | 新增 `MetadataSyncService` 同步骨架：读取 `data_source` 配置、解密凭证后构造采集器、使用 Redis NX + PostgreSQL advisory lock 同源互斥、按 `include_rules` / `exclude_rules` 过滤库表、生成标准 URN，并通过 `INSERT ... ON CONFLICT` 分批 upsert `table_meta` / `column_meta` / `index_meta`；本切片不提前实现 T3.2 diff、T3.3 软删除和 T3.4 执行日志。 | 红灯：`.venv/bin/pytest -q tests/services/test_metadata_sync_service.py` 因 `app.services.metadata_sync` 不存在失败，表名白名单边界测试在修复前失败；绿灯：`.venv/bin/pytest -q tests/services/test_metadata_sync_service.py`、`./scripts/run-gate-tests.sh`、`.venv/bin/pytest -v`、`.venv/bin/ruff check app tests alembic`、`.venv/bin/ruff format --check app tests alembic`、`.venv/bin/mypy app`、`.venv/bin/alembic upgrade head --sql` |
+| 2026-08-06 | T3.2 变更 diff 与落库 | 已完成 | 新增 `schema_diff` 服务：识别表新增/删除、字段新增/删除、字段类型变更、字段注释变更、索引新增/删除/变化，并写入 `schema_change_log`；`MetadataSyncService` 在 upsert 前调用 diff logger 并返回 `changed_count`；旧快照读取按本次扫描库范围过滤，避免白/黑名单局部同步误报删除。本切片不提前实现 T3.3 的 `is_deleted` 置位。 | 红灯：`.venv/bin/pytest -q tests/services/test_schema_diff_service.py` 因 `app.services.schema_diff` 不存在失败，局部同步旧快照过滤边界测试在修复前失败；绿灯：`.venv/bin/pytest -q tests/services/test_schema_diff_service.py`、`.venv/bin/pytest -q tests/services/test_metadata_sync_service.py`、`./scripts/run-gate-tests.sh`、`.venv/bin/pytest -v`、`.venv/bin/ruff check app tests alembic`、`.venv/bin/ruff format --check app tests alembic`、`.venv/bin/mypy app`、`.venv/bin/alembic upgrade head --sql` |
 
 ---
 
@@ -347,4 +348,5 @@ Doris & StarRocks & ClickHouse & Hive 采集器、数仓分层识别、字段名
 - [x] T1.4 ~ T1.6 视图、授权脚本、阈值配置落地
 - [x] T2.1 ~ T2.5 采集器框架、MySQL/PostgreSQL 采集器、注释门禁、限流熔断
 - [x] T3.1 同步主流程骨架落地（锁、过滤、分批 upsert、幂等）
+- [x] T3.2 变更 diff 与 `schema_change_log` 后端落库
 - [ ] 只读账号到位后立即跑 T9.1 注释覆盖率摸底——**这个结果影响 V0.5 范围，越早越好**

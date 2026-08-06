@@ -24,6 +24,7 @@ from app.collectors import BaseCollector, DataSourceConfig, get_collector
 from app.core.config import get_settings
 from app.db.session import collector_session
 from app.models.metadata import ColumnMeta, DataSource, IndexMeta, TableMeta
+from app.services.schema_diff import SQLAlchemySchemaChangeLogger
 
 
 class SyncSession(Protocol):
@@ -55,6 +56,19 @@ class MetadataWriter(Protocol):
     ) -> None: ...
 
 
+class SchemaChangeLogger(Protocol):
+    async def detect_and_log(
+        self,
+        session: SyncSession,
+        *,
+        source_id: int,
+        tables: list[dict[str, Any]],
+        columns: list[dict[str, Any]],
+        indexes: list[dict[str, Any]],
+        detected_at: datetime,
+    ) -> int: ...
+
+
 class RedisClient(Protocol):
     async def set(self, name: str, value: str, *, ex: int, nx: bool) -> Any: ...
 
@@ -76,6 +90,7 @@ class SyncResult:
     scanned_tables: int = 0
     scanned_columns: int = 0
     scanned_indexes: int = 0
+    changed_count: int = 0
 
 
 class InMemorySourceLock:
@@ -239,6 +254,7 @@ class MetadataSyncService:
         credential_decrypter: CredentialDecrypter | None = None,
         lock: SourceLock | None = None,
         writer: MetadataWriter | None = None,
+        change_logger: SchemaChangeLogger | None = None,
         batch_size: int | None = None,
     ):
         settings = get_settings()
@@ -248,6 +264,9 @@ class MetadataSyncService:
         self._credential_decrypter = credential_decrypter or _decrypt_credential
         self._lock = lock or RedisPostgresSourceLock(ttl_seconds=settings.SYNC_LOCK_TTL_SECONDS)
         self._writer = writer or SQLAlchemyMetadataWriter(batch_size=effective_batch_size)
+        self._change_logger = change_logger or SQLAlchemySchemaChangeLogger(
+            batch_size=effective_batch_size
+        )
         self._batch_size = effective_batch_size
 
     async def sync_source(self, source_id: int) -> SyncResult:
@@ -350,6 +369,14 @@ class MetadataSyncService:
                 if (index.db_name, index.table_name) in table_urns
             )
 
+        changed_count = await self._change_logger.detect_and_log(
+            session,
+            source_id=source.id,
+            tables=table_rows,
+            columns=column_rows,
+            indexes=index_rows,
+            detected_at=now,
+        )
         await self._writer.write_snapshot(
             session,
             tables=table_rows,
@@ -363,6 +390,7 @@ class MetadataSyncService:
             scanned_tables=len(table_rows),
             scanned_columns=len(column_rows),
             scanned_indexes=len(index_rows),
+            changed_count=changed_count,
         )
 
 
