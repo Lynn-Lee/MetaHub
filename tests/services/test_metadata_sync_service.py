@@ -96,6 +96,59 @@ class FakeCollector(BaseCollector):
         ]
 
 
+class PartiallyFailingCollector(FakeCollector):
+    async def list_databases(self) -> list[DatabaseInfo]:
+        self._started.append(self.config.password)
+        return [DatabaseInfo(name="broken"), DatabaseInfo(name="sales")]
+
+    async def list_tables(self, db_name: str) -> list[TableInfo]:
+        if db_name == "broken":
+            raise TimeoutError("metadata query timed out")
+        return await super().list_tables(db_name)
+
+
+class BrokenColumn:
+    db_name = "sales"
+    table_name = "bad_orders"
+
+
+class TableScopedFailingCollector(FakeCollector):
+    async def list_databases(self) -> list[DatabaseInfo]:
+        self._started.append(self.config.password)
+        return [DatabaseInfo(name="sales")]
+
+    async def list_tables(self, db_name: str) -> list[TableInfo]:
+        return [
+            TableInfo(
+                db_name=db_name,
+                table_name="orders",
+                table_type="TABLE",
+                table_comment="订单表",
+            ),
+            TableInfo(
+                db_name=db_name,
+                table_name="bad_orders",
+                table_type="TABLE",
+                table_comment="坏表",
+            ),
+        ]
+
+    async def list_columns(self, db_name: str) -> list[object]:
+        return [
+            ColumnInfo(
+                db_name=db_name,
+                table_name="orders",
+                column_name="pay_amount",
+                ordinal=1,
+                raw_type="decimal(12,2)",
+                logical_type="DECIMAL",
+                is_nullable=False,
+                raw_comment="支付金额",
+            ),
+            BrokenColumn(),
+        ]
+
+
 class RecordingWriter:
     def __init__(self) -> None:
         self.table_urns: list[str] = []
@@ -134,6 +187,38 @@ class RecordingChangeLogger:
         del session, source_id, detected_at
         self.calls.append((tables, columns, indexes))
         return 1
+
+
+class RecordingRunRecorder:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def record_run(
+        self,
+        session: object,
+        *,
+        source_id: int,
+        trigger_type: str,
+        status: str,
+        scanned_tables: int,
+        changed_count: int,
+        comment_fill_rate: object,
+        started_at: datetime,
+        finished_at: datetime,
+        failures: list[object],
+    ) -> None:
+        del session, started_at, finished_at
+        self.calls.append(
+            {
+                "source_id": source_id,
+                "trigger_type": trigger_type,
+                "status": status,
+                "scanned_tables": scanned_tables,
+                "changed_count": changed_count,
+                "comment_fill_rate": comment_fill_rate,
+                "failures": failures,
+            }
+        )
 
 
 class FakeSession:
@@ -241,6 +326,7 @@ async def test_sync_source_filters_scope_decrypts_credentials_and_upserts_snapsh
         lock=InMemorySourceLock(),
         writer=writer,
         change_logger=change_logger,
+        run_recorder=RecordingRunRecorder(),
         batch_size=1,
     )
 
@@ -255,6 +341,56 @@ async def test_sync_source_filters_scope_decrypts_credentials_and_upserts_snapsh
     assert writer.index_names == ["idx_orders_pay_amount"]
     assert result.changed_count == 1
     assert change_logger.calls[0][0][0]["urn"] == "mysql:crm:sales:orders"
+    assert session.commits == 1
+
+
+async def test_sync_source_records_partial_run_when_one_database_fails() -> None:
+    source = _source(include_rules=[], exclude_rules=[{"table": "*_bak"}])
+    session = FakeSession(source)
+    writer = RecordingWriter()
+    run_recorder = RecordingRunRecorder()
+    service = MetadataSyncService(
+        session_factory=lambda: _session_factory(session),
+        collector_factory=lambda db_type, config: PartiallyFailingCollector(config, started=[]),
+        credential_decrypter=lambda cipher: cipher,
+        lock=InMemorySourceLock(),
+        writer=writer,
+        change_logger=RecordingChangeLogger(),
+        run_recorder=run_recorder,
+    )
+
+    result = await service.sync_source(source.id)
+
+    assert result.status == "PARTIAL"
+    assert writer.table_urns == [
+        "mysql:crm:sales:orders",
+    ]
+    assert run_recorder.calls[0]["status"] == "PARTIAL"
+    assert run_recorder.calls[0]["scanned_tables"] == 1
+    assert len(run_recorder.calls[0]["failures"]) == 1
+    assert session.commits == 1
+
+
+async def test_sync_source_records_table_scoped_failure_without_blocking_other_tables() -> None:
+    source = _source(include_rules=[], exclude_rules=[])
+    session = FakeSession(source)
+    writer = RecordingWriter()
+    run_recorder = RecordingRunRecorder()
+    service = MetadataSyncService(
+        session_factory=lambda: _session_factory(session),
+        collector_factory=lambda db_type, config: TableScopedFailingCollector(config, started=[]),
+        credential_decrypter=lambda cipher: cipher,
+        lock=InMemorySourceLock(),
+        writer=writer,
+        change_logger=RecordingChangeLogger(),
+        run_recorder=run_recorder,
+    )
+
+    result = await service.sync_source(source.id)
+
+    assert result.status == "PARTIAL"
+    assert writer.column_urns == ["mysql:crm:sales:orders:pay_amount"]
+    assert run_recorder.calls[0]["failures"][0].table_name == "bad_orders"
     assert session.commits == 1
 
 
@@ -290,6 +426,7 @@ async def test_sync_source_keeps_databases_when_include_rule_is_table_only() -> 
         lock=InMemorySourceLock(),
         writer=writer,
         change_logger=RecordingChangeLogger(),
+        run_recorder=RecordingRunRecorder(),
     )
 
     result = await service.sync_source(source.id)

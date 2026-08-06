@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
@@ -25,6 +26,11 @@ from app.core.config import get_settings
 from app.db.session import collector_session
 from app.models.metadata import ColumnMeta, DataSource, IndexMeta, TableMeta
 from app.services.schema_diff import SQLAlchemySchemaChangeLogger
+from app.services.sync_run import (
+    SQLAlchemySyncRunRecorder,
+    SyncFailure,
+    calculate_comment_fill_rate,
+)
 
 
 class SyncSession(Protocol):
@@ -69,6 +75,23 @@ class SchemaChangeLogger(Protocol):
     ) -> int: ...
 
 
+class SyncRunRecorder(Protocol):
+    async def record_run(
+        self,
+        session: SyncSession,
+        *,
+        source_id: int,
+        trigger_type: str,
+        status: str,
+        scanned_tables: int,
+        changed_count: int,
+        comment_fill_rate: Decimal,
+        started_at: datetime,
+        finished_at: datetime,
+        failures: list[SyncFailure],
+    ) -> None: ...
+
+
 class RedisClient(Protocol):
     async def set(self, name: str, value: str, *, ex: int, nx: bool) -> Any: ...
 
@@ -91,6 +114,8 @@ class SyncResult:
     scanned_columns: int = 0
     scanned_indexes: int = 0
     changed_count: int = 0
+    fail_count: int = 0
+    comment_fill_rate: Decimal = Decimal("0.00")
 
 
 class InMemorySourceLock:
@@ -255,6 +280,7 @@ class MetadataSyncService:
         lock: SourceLock | None = None,
         writer: MetadataWriter | None = None,
         change_logger: SchemaChangeLogger | None = None,
+        run_recorder: SyncRunRecorder | None = None,
         batch_size: int | None = None,
     ):
         settings = get_settings()
@@ -267,9 +293,10 @@ class MetadataSyncService:
         self._change_logger = change_logger or SQLAlchemySchemaChangeLogger(
             batch_size=effective_batch_size
         )
+        self._run_recorder = run_recorder or SQLAlchemySyncRunRecorder()
         self._batch_size = effective_batch_size
 
-    async def sync_source(self, source_id: int) -> SyncResult:
+    async def sync_source(self, source_id: int, *, trigger_type: str = "MANUAL") -> SyncResult:
         async with self._session_factory() as session:
             source = await session.get(DataSource, source_id)
             if source is None or not source.enabled:
@@ -280,7 +307,11 @@ class MetadataSyncService:
                 return SyncResult(source_id=source_id, status="SKIPPED_LOCKED")
 
             try:
-                result = await self._collect_and_write(session, source)
+                result = await self._collect_and_write(
+                    session,
+                    source,
+                    trigger_type=trigger_type,
+                )
                 await session.commit()
                 return result
             except Exception:
@@ -289,7 +320,14 @@ class MetadataSyncService:
             finally:
                 await self._lock.release(session, source.id)
 
-    async def _collect_and_write(self, session: SyncSession, source: DataSource) -> SyncResult:
+    async def _collect_and_write(
+        self,
+        session: SyncSession,
+        source: DataSource,
+        *,
+        trigger_type: str,
+    ) -> SyncResult:
+        started_at = datetime.now(UTC)
         collector = self._collector_factory(
             source.db_type,
             DataSourceConfig(
@@ -319,11 +357,17 @@ class MetadataSyncService:
         table_rows: list[dict[str, Any]] = []
         column_rows: list[dict[str, Any]] = []
         index_rows: list[dict[str, Any]] = []
+        failures: list[SyncFailure] = []
 
         for database in databases:
+            try:
+                raw_tables = await collector.list_tables(database.name)
+            except Exception as exc:  # noqa: BLE001 - 单库采集失败需记录明细并继续其他库
+                failures.append(_sync_failure(source.id, database.name, "tables", exc))
+                continue
             table_infos = [
                 table
-                for table in await collector.list_tables(database.name)
+                for table in raw_tables
                 if _matches_scope(
                     table.db_name,
                     table.table_name,
@@ -358,16 +402,53 @@ class MetadataSyncService:
                 for table in table_infos
             )
 
-            column_rows.extend(
-                _column_row(column, table_urns[(column.db_name, column.table_name)], now)
-                for column in await collector.list_columns(database.name)
-                if (column.db_name, column.table_name) in table_urns
-            )
-            index_rows.extend(
-                _index_row(index, table_urns[(index.db_name, index.table_name)], now)
-                for index in await collector.list_indexes(database.name)
-                if (index.db_name, index.table_name) in table_urns
-            )
+            try:
+                raw_columns = await collector.list_columns(database.name)
+                for column in raw_columns:
+                    if (column.db_name, column.table_name) not in table_urns:
+                        continue
+                    try:
+                        column_rows.append(
+                            _column_row(
+                                column,
+                                table_urns[(column.db_name, column.table_name)],
+                                now,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 单表字段元数据异常需记录并继续
+                        failures.append(
+                            _sync_failure(
+                                source.id,
+                                database.name,
+                                "columns",
+                                exc,
+                                table_name=column.table_name,
+                            )
+                        )
+            except Exception as exc:  # noqa: BLE001 - 单库字段采集失败需记录明细并继续其他库
+                failures.append(_sync_failure(source.id, database.name, "columns", exc))
+
+            try:
+                raw_indexes = await collector.list_indexes(database.name)
+                for index in raw_indexes:
+                    if (index.db_name, index.table_name) not in table_urns:
+                        continue
+                    try:
+                        index_rows.append(
+                            _index_row(index, table_urns[(index.db_name, index.table_name)], now)
+                        )
+                    except Exception as exc:  # noqa: BLE001 - 单表索引元数据异常需记录并继续
+                        failures.append(
+                            _sync_failure(
+                                source.id,
+                                database.name,
+                                "indexes",
+                                exc,
+                                table_name=index.table_name,
+                            )
+                        )
+            except Exception as exc:  # noqa: BLE001 - 单库索引采集失败需记录明细并继续其他库
+                failures.append(_sync_failure(source.id, database.name, "indexes", exc))
 
         changed_count = await self._change_logger.detect_and_log(
             session,
@@ -383,14 +464,31 @@ class MetadataSyncService:
             columns=column_rows,
             indexes=index_rows,
         )
+        status = "PARTIAL" if failures else "SUCCESS"
+        comment_fill_rate = calculate_comment_fill_rate(column_rows)
+        finished_at = datetime.now(UTC)
+        await self._run_recorder.record_run(
+            session,
+            source_id=source.id,
+            trigger_type=trigger_type,
+            status=status,
+            scanned_tables=len(table_rows),
+            changed_count=changed_count,
+            comment_fill_rate=comment_fill_rate,
+            started_at=started_at,
+            finished_at=finished_at,
+            failures=failures,
+        )
         return SyncResult(
             source_id=source.id,
-            status="SUCCESS",
+            status=status,
             scanned_databases=len(databases),
             scanned_tables=len(table_rows),
             scanned_columns=len(column_rows),
             scanned_indexes=len(index_rows),
             changed_count=changed_count,
+            fail_count=len(failures),
+            comment_fill_rate=comment_fill_rate,
         )
 
 
@@ -433,6 +531,24 @@ def _index_row(index: Any, table_urn: str, synced_at: datetime) -> dict[str, Any
         ],
         "synced_at": synced_at,
     }
+
+
+def _sync_failure(
+    source_id: int,
+    db_name: str,
+    stage: str,
+    exc: Exception,
+    *,
+    table_name: str | None = None,
+) -> SyncFailure:
+    return SyncFailure(
+        source_id=source_id,
+        db_name=db_name,
+        table_name=table_name,
+        stage=stage,
+        error_type=type(exc).__name__,
+        error_msg=str(exc),
+    )
 
 
 def _table_urn(source: DataSource, db_name: str, table_name: str) -> str:
