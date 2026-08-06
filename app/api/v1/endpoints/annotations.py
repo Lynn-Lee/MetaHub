@@ -5,9 +5,14 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, Response, status
 from pydantic import ValidationError
 
-from app.core.exceptions import AnnotationReadonlyFieldError, MetaHubError
+from app.core.exceptions import AnnotationBatchError, AnnotationReadonlyFieldError, MetaHubError
 from app.db.session import get_web_session
-from app.schemas.annotations import FieldAnnotationOut, FieldAnnotationPayload
+from app.schemas.annotations import (
+    FieldAnnotationOut,
+    FieldAnnotationPayload,
+    TableFieldAnnotationsOut,
+    TableFieldAnnotationsPayload,
+)
 from app.services.annotations import AnnotationSession, SQLAlchemyAnnotationService
 
 router = APIRouter(prefix="/annotations", tags=["annotations"])
@@ -60,6 +65,25 @@ async def upsert_field_annotation(
     return await service.upsert_field_annotation(session, urn=urn, payload=payload)
 
 
+@router.put(
+    "/table/fields",
+    response_model=TableFieldAnnotationsOut,
+    summary="表内批量标注字段",
+)
+async def upsert_table_field_annotations(
+    table_urn: str,
+    raw_payload: Annotated[dict[str, Any], Body(...)],
+    session: Annotated[AnnotationSession, Depends(get_web_session)],
+) -> TableFieldAnnotationsOut:
+    payload = _parse_table_field_annotations_payload(raw_payload)
+    service = SQLAlchemyAnnotationService()
+    return await service.upsert_table_field_annotations(
+        session,
+        table_urn=table_urn,
+        items=payload.items,
+    )
+
+
 @router.delete("/field", status_code=status.HTTP_204_NO_CONTENT, summary="删除单字段标注")
 async def delete_field_annotation(
     urn: str,
@@ -77,3 +101,44 @@ def _reject_collection_fields(payload: dict[str, Any]) -> None:
             "标注接口不允许写入采集层字段",
             detail={"fields": fields},
         )
+
+
+def _parse_table_field_annotations_payload(
+    raw_payload: dict[str, Any],
+) -> TableFieldAnnotationsPayload:
+    errors = _collect_batch_payload_errors(raw_payload)
+    if errors:
+        raise AnnotationBatchError("表内批量标注失败", detail={"errors": errors})
+    try:
+        return TableFieldAnnotationsPayload.model_validate(raw_payload)
+    except ValidationError as exc:
+        raise AnnotationBatchError(
+            "表内批量标注失败",
+            detail={"errors": [{"urn": "", "message": str(exc)}]},
+        ) from exc
+
+
+def _collect_batch_payload_errors(raw_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    raw_items = raw_payload.get("items")
+    if not isinstance(raw_items, list):
+        return [{"urn": "", "message": "items 必须是数组"}]
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            errors.append({"urn": "", "message": "批量项必须是对象"})
+            continue
+        urn = raw_item.get("urn")
+        raw_annotation = raw_item.get("annotation")
+        if not isinstance(raw_annotation, dict):
+            errors.append({"urn": str(urn or ""), "message": "annotation 必须是对象"})
+            continue
+        fields = sorted(_COLLECTION_FIELDS.intersection(raw_annotation))
+        if fields:
+            errors.append(
+                {
+                    "urn": str(urn or ""),
+                    "fields": fields,
+                    "message": "标注接口不允许写入采集层字段",
+                }
+            )
+    return errors

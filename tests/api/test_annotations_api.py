@@ -37,3 +37,41 @@ def test_field_annotation_endpoint_rejects_collection_fields_with_400() -> None:
     assert response.status_code == 400
     assert response.json()["code"] == ErrorCode.ANNOTATION_READONLY_FIELD
     assert response.json()["detail"]["fields"] == ["raw_type"]
+
+
+def test_table_batch_annotation_endpoint_returns_per_field_errors_without_db_write() -> None:
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(annotations.router)
+    app.dependency_overrides[get_web_session] = fake_session
+    client = TestClient(app)
+
+    response = client.put(
+        "/annotations/table/fields",
+        params={"table_urn": "mysql:crm:sales:orders"},
+        json={
+            "items": [
+                {
+                    "urn": "mysql:crm:sales:orders:pay_amount",
+                    "annotation": {"business_meaning": "订单支付金额"},
+                },
+                {
+                    "urn": "mysql:crm:sales:orders:order_status",
+                    "annotation": {
+                        "business_meaning": "订单状态",
+                        "raw_type": "tinyint",
+                    },
+                },
+            ]
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == ErrorCode.ANNOTATION_BATCH_FAILED
+    assert response.json()["detail"]["errors"] == [
+        {
+            "urn": "mysql:crm:sales:orders:order_status",
+            "fields": ["raw_type"],
+            "message": "标注接口不允许写入采集层字段",
+        }
+    ]

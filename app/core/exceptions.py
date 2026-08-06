@@ -36,6 +36,7 @@ class ErrorCode(StrEnum):
     # 见 DEV-TASKS T5.1 验收标准。
     ANNOTATION_READONLY_FIELD = "METAHUB-3001"
     ANNOTATION_MERGE_CONFLICT = "METAHUB-3002"
+    ANNOTATION_BATCH_FAILED = "METAHUB-3003"
 
     # 4xxx 检索
     QUERY_TOO_SHORT = "METAHUB-4000"
@@ -104,6 +105,11 @@ class AnnotationReadonlyFieldError(MetaHubError):
 
     status_code = status.HTTP_400_BAD_REQUEST
     code = ErrorCode.ANNOTATION_READONLY_FIELD
+
+
+class AnnotationBatchError(MetaHubError):
+    status_code = status.HTTP_400_BAD_REQUEST
+    code = ErrorCode.ANNOTATION_BATCH_FAILED
 
 
 def _error_body(code: str, message: str, detail: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-"""字段标注服务（DEV-TASKS T5.1）。"""
+"""字段标注服务（DEV-TASKS T5.1 / T5.2）。"""
 
 from __future__ import annotations
 
@@ -8,15 +8,22 @@ from typing import Any, Protocol, cast
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 
-from app.core.exceptions import ErrorCode, NotFoundError
+from app.core.exceptions import AnnotationBatchError, ErrorCode, NotFoundError
 from app.models.knowledge import AnnotationHistory, AssetAnnotation
-from app.schemas.annotations import FieldAnnotationOut, FieldAnnotationPayload
+from app.schemas.annotations import (
+    BatchFieldAnnotationPayload,
+    FieldAnnotationOut,
+    FieldAnnotationPayload,
+    TableFieldAnnotationsOut,
+)
 
 
 class AnnotationSession(Protocol):
     async def execute(self, statement: object, parameters: dict[str, Any] | None = None) -> Any: ...
 
     async def commit(self) -> None: ...
+
+    async def rollback(self) -> None: ...
 
 
 _ANNOTATION_FIELDS = (
@@ -66,36 +73,57 @@ class SQLAlchemyAnnotationService:
         operator_id: int | None = None,
     ) -> FieldAnnotationOut:
         now = datetime.now(UTC)
-        existing = await self._load_field_annotation(session, urn=urn)
-        before_data = _annotation_snapshot(existing) if existing is not None else None
-        values = _annotation_values(
+        annotation = await self._upsert_field_annotation_without_commit(
+            session,
             urn=urn,
             payload=payload,
             operator_id=operator_id,
             now=now,
-            is_create=existing is None,
-        )
-        update_values = {key: value for key, value in values.items() if key not in {"created_at"}}
-        result = await session.execute(
-            insert(AssetAnnotation)
-            .values(values)
-            .on_conflict_do_update(
-                index_elements=[AssetAnnotation.urn],
-                set_=update_values,
-            )
-            .returning(AssetAnnotation)
-        )
-        annotation = cast(AssetAnnotation, result.scalar_one())
-        await _write_history(
-            session,
-            urn=urn,
-            before_data=before_data,
-            after_data=_annotation_snapshot(annotation),
-            operator_id=operator_id,
-            created_at=now,
         )
         await session.commit()
         return _annotation_out(annotation)
+
+    async def upsert_table_field_annotations(
+        self,
+        session: AnnotationSession,
+        *,
+        table_urn: str,
+        items: list[BatchFieldAnnotationPayload],
+        operator_id: int | None = None,
+    ) -> TableFieldAnnotationsOut:
+        now = datetime.now(UTC)
+        saved: list[AssetAnnotation] = []
+        errors: list[dict[str, str]] = []
+        try:
+            for item in items:
+                if not _belongs_to_table(item.urn, table_urn):
+                    errors.append({"urn": item.urn, "message": "字段 URN 不属于当前表"})
+                    continue
+                try:
+                    saved.append(
+                        await self._upsert_field_annotation_without_commit(
+                            session,
+                            urn=item.urn,
+                            payload=item.annotation,
+                            operator_id=operator_id,
+                            now=now,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - 批量接口必须逐字段收集错误
+                    errors.append({"urn": item.urn, "message": str(exc)})
+            if errors:
+                await session.rollback()
+                raise AnnotationBatchError("表内批量标注失败", detail={"errors": errors})
+            await session.commit()
+        except AnnotationBatchError:
+            raise
+        except Exception:
+            await session.rollback()
+            raise
+        return TableFieldAnnotationsOut(
+            table_urn=table_urn,
+            items=[_annotation_out(annotation) for annotation in saved],
+        )
 
     async def delete_field_annotation(
         self,
@@ -126,6 +154,45 @@ class SQLAlchemyAnnotationService:
             created_at=now,
         )
         await session.commit()
+
+    async def _upsert_field_annotation_without_commit(
+        self,
+        session: AnnotationSession,
+        *,
+        urn: str,
+        payload: FieldAnnotationPayload,
+        operator_id: int | None,
+        now: datetime,
+    ) -> AssetAnnotation:
+        existing = await self._load_field_annotation(session, urn=urn)
+        before_data = _annotation_snapshot(existing) if existing is not None else None
+        values = _annotation_values(
+            urn=urn,
+            payload=payload,
+            operator_id=operator_id,
+            now=now,
+            is_create=existing is None,
+        )
+        update_values = {key: value for key, value in values.items() if key not in {"created_at"}}
+        result = await session.execute(
+            insert(AssetAnnotation)
+            .values(values)
+            .on_conflict_do_update(
+                index_elements=[AssetAnnotation.urn],
+                set_=update_values,
+            )
+            .returning(AssetAnnotation)
+        )
+        annotation = cast(AssetAnnotation, result.scalar_one())
+        await _write_history(
+            session,
+            urn=urn,
+            before_data=before_data,
+            after_data=_annotation_snapshot(annotation),
+            operator_id=operator_id,
+            created_at=now,
+        )
+        return annotation
 
     async def _load_field_annotation(
         self,
@@ -207,3 +274,7 @@ def _annotation_out(annotation: object) -> FieldAnnotationOut:
     snapshot = _annotation_snapshot(annotation)
     assert snapshot is not None
     return FieldAnnotationOut.model_validate(snapshot)
+
+
+def _belongs_to_table(urn: str, table_urn: str) -> bool:
+    return urn.startswith(f"{table_urn}:") and urn != table_urn

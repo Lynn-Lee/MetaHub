@@ -20,6 +20,15 @@ class FieldAnnotationPayload(BaseModel):
     owner_id: int | None = None
 
 
+class BatchFieldAnnotationPayload(BaseModel):
+    urn: str
+    annotation: FieldAnnotationPayload
+
+
+class TableFieldAnnotationsPayload(BaseModel):
+    items: list[BatchFieldAnnotationPayload] = Field(min_length=1)
+
+
 class FieldAnnotationOut(BaseModel):
     urn: str
     asset_type: str
@@ -40,3 +49,8 @@ class FieldAnnotationOut(BaseModel):
     updated_by: int | None
     created_at: datetime | None
     updated_at: datetime | None
+
+
+class TableFieldAnnotationsOut(BaseModel):
+    table_urn: str
+    items: list[FieldAnnotationOut]

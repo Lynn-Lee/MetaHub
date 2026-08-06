@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
-from app.schemas.annotations import FieldAnnotationPayload
+from app.core.exceptions import AnnotationBatchError
+from app.schemas.annotations import BatchFieldAnnotationPayload, FieldAnnotationPayload
 from app.services.annotations import SQLAlchemyAnnotationService
 
 
@@ -51,11 +53,14 @@ class RecordingSession:
         *,
         existing: AnnotationRow | None = None,
         saved: AnnotationRow | None = None,
+        fail_on_urn: str | None = None,
     ) -> None:
         self.existing = existing
         self.saved = saved
+        self.fail_on_urn = fail_on_urn
         self.statements: list[str] = []
         self.commits = 0
+        self.rollbacks = 0
 
     async def execute(
         self,
@@ -65,6 +70,8 @@ class RecordingSession:
         del parameters
         compiled = str(statement.compile(dialect=postgresql.dialect())).replace("\n", " ")
         self.statements.append(compiled)
+        if self.fail_on_urn is not None and self.fail_on_urn in str(statement.compile().params):
+            raise ValueError("dictionary is invalid")
         if compiled.startswith("SELECT asset_annotation"):
             return ScalarResult(self.existing)
         if "INSERT INTO asset_annotation" in compiled and "RETURNING" in compiled:
@@ -73,6 +80,9 @@ class RecordingSession:
 
     async def commit(self) -> None:
         self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
 
 
 async def test_upsert_field_annotation_writes_annotation_and_history() -> None:
@@ -125,3 +135,42 @@ async def test_delete_field_annotation_writes_history_before_deleting() -> None:
     assert "DELETE FROM asset_annotation" in joined
     assert "INSERT INTO annotation_history" in joined
     assert session.commits == 1
+
+
+async def test_batch_upsert_rolls_back_and_returns_field_errors_on_partial_failure() -> None:
+    table_urn = "mysql:crm:sales:orders"
+    bad_urn = f"{table_urn}:order_status"
+    session = RecordingSession(
+        saved=AnnotationRow(
+            urn=f"{table_urn}:pay_amount",
+            business_meaning="订单支付金额",
+        ),
+        fail_on_urn=bad_urn,
+    )
+    service = SQLAlchemyAnnotationService()
+
+    with pytest.raises(AnnotationBatchError) as exc_info:
+        await service.upsert_table_field_annotations(
+            session,
+            table_urn=table_urn,
+            items=[
+                BatchFieldAnnotationPayload(
+                    urn=f"{table_urn}:pay_amount",
+                    annotation=FieldAnnotationPayload(business_meaning="订单支付金额"),
+                ),
+                BatchFieldAnnotationPayload(
+                    urn=bad_urn,
+                    annotation=FieldAnnotationPayload(business_meaning="订单状态"),
+                ),
+            ],
+            operator_id=1001,
+        )
+
+    assert session.commits == 0
+    assert session.rollbacks == 1
+    assert exc_info.value.detail["errors"] == [
+        {
+            "urn": bad_urn,
+            "message": "dictionary is invalid",
+        }
+    ]
