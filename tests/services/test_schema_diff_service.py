@@ -195,6 +195,48 @@ async def test_sqlalchemy_schema_change_logger_inserts_schema_change_log_rows() 
     assert "INSERT INTO schema_change_log" in session.statements[0]
 
 
+async def test_schema_change_logger_soft_deletes_dropped_tables_and_cascades_columns() -> None:
+    session = RecordingSQLSession()
+    logger = SQLAlchemySchemaChangeLogger(batch_size=100)
+    deleted_at = datetime.now(UTC)
+
+    await logger.mark_soft_deletes(
+        session,
+        [
+            {
+                "urn": "mysql:crm:sales:legacy",
+                "table_urn": "mysql:crm:sales:legacy",
+                "asset_type": "TABLE",
+                "change_type": "TABLE_DROPPED",
+                "before_value": {"urn": "mysql:crm:sales:legacy"},
+                "after_value": None,
+                "rename_candidate": None,
+                "rename_status": None,
+                "detected_at": deleted_at,
+            },
+            {
+                "urn": "mysql:crm:sales:orders:old_flag",
+                "table_urn": "mysql:crm:sales:orders",
+                "asset_type": "COLUMN",
+                "change_type": "COLUMN_DROPPED",
+                "before_value": {"urn": "mysql:crm:sales:orders:old_flag"},
+                "after_value": None,
+                "rename_candidate": None,
+                "rename_status": None,
+                "detected_at": deleted_at,
+            },
+        ],
+        deleted_at=deleted_at,
+    )
+
+    assert len(session.statements) == 2
+    assert "UPDATE table_meta SET is_deleted=" in session.statements[0]
+    assert "table_meta.urn IN" in session.statements[0]
+    assert "UPDATE column_meta SET is_deleted=" in session.statements[1]
+    assert "column_meta.table_urn IN" in session.statements[1]
+    assert "column_meta.urn IN" in session.statements[1]
+
+
 async def test_schema_change_logger_limits_existing_tables_to_scanned_databases() -> None:
     session = RecordingReadSession()
     logger = SQLAlchemySchemaChangeLogger(batch_size=100)
@@ -216,3 +258,5 @@ async def test_schema_change_logger_limits_existing_tables_to_scanned_databases(
     )
 
     assert "table_meta.db_name IN" in session.statements[0]
+    assert "table_meta.is_deleted IS false" in session.statements[0]
+    assert "column_meta.is_deleted IS false" in session.statements[1]

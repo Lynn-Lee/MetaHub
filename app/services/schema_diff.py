@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.models.metadata import ColumnMeta, IndexMeta, TableMeta
@@ -46,6 +46,7 @@ class SQLAlchemySchemaChangeLogger:
             detected_at=detected_at,
         )
         await self.log_changes(session, changes)
+        await self.mark_soft_deletes(session, changes, deleted_at=detected_at)
         return len(changes)
 
     async def log_changes(
@@ -55,6 +56,45 @@ class SQLAlchemySchemaChangeLogger:
     ) -> None:
         for batch in _chunked(changes, self._batch_size):
             await session.execute(insert(SchemaChangeLog).values(batch))
+
+    async def mark_soft_deletes(
+        self,
+        session: DiffSession,
+        changes: list[dict[str, Any]],
+        *,
+        deleted_at: datetime,
+    ) -> None:
+        dropped_table_urns = {
+            str(change["urn"]) for change in changes if change["change_type"] == "TABLE_DROPPED"
+        }
+        dropped_column_urns = {
+            str(change["urn"]) for change in changes if change["change_type"] == "COLUMN_DROPPED"
+        }
+
+        if dropped_table_urns:
+            await session.execute(
+                update(TableMeta)
+                .where(
+                    TableMeta.urn.in_(dropped_table_urns),
+                    TableMeta.is_deleted.is_(False),
+                )
+                .values(is_deleted=True, deleted_at=deleted_at)
+            )
+
+        column_delete_predicates = []
+        if dropped_table_urns:
+            column_delete_predicates.append(ColumnMeta.table_urn.in_(dropped_table_urns))
+        if dropped_column_urns:
+            column_delete_predicates.append(ColumnMeta.urn.in_(dropped_column_urns))
+        if column_delete_predicates:
+            await session.execute(
+                update(ColumnMeta)
+                .where(
+                    or_(*column_delete_predicates),
+                    ColumnMeta.is_deleted.is_(False),
+                )
+                .values(is_deleted=True, deleted_at=deleted_at)
+            )
 
 
 def detect_schema_changes(
@@ -305,6 +345,7 @@ async def _load_existing_tables(
         ).where(
             TableMeta.source_id == source_id,
             TableMeta.db_name.in_(scanned_databases),
+            TableMeta.is_deleted.is_(False),
         )
     )
     return [_row_to_dict(row) for row in result.mappings().all()]
@@ -334,7 +375,10 @@ async def _load_existing_columns(
             ColumnMeta.is_auto_incr,
             ColumnMeta.is_unique,
             ColumnMeta.is_partition_key,
-        ).where(ColumnMeta.table_urn.in_(table_urns))
+        ).where(
+            ColumnMeta.table_urn.in_(table_urns),
+            ColumnMeta.is_deleted.is_(False),
+        )
     )
     return [_row_to_dict(row) for row in result.mappings().all()]
 
