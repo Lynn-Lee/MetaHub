@@ -1,8 +1,8 @@
 """元数据同步主流程（DEV-TASKS T3.1）。
 
 本模块只负责 T3.1 的同步骨架：凭证解密、同源互斥、白/黑名单过滤、
-批量采集层 upsert 与幂等提交。变更 diff、软删除、执行日志和告警分别留给
-T3.2、T3.3、T3.4。
+批量采集层 upsert 与幂等提交。T3.2+ 在此基础上接入变更 diff、软删除、
+执行日志、告警和手动范围触发。
 """
 
 from __future__ import annotations
@@ -296,7 +296,14 @@ class MetadataSyncService:
         self._run_recorder = run_recorder or SQLAlchemySyncRunRecorder()
         self._batch_size = effective_batch_size
 
-    async def sync_source(self, source_id: int, *, trigger_type: str = "MANUAL") -> SyncResult:
+    async def sync_source(
+        self,
+        source_id: int,
+        *,
+        trigger_type: str = "MANUAL",
+        db_name: str | None = None,
+        table_name: str | None = None,
+    ) -> SyncResult:
         async with self._session_factory() as session:
             source = await session.get(DataSource, source_id)
             if source is None or not source.enabled:
@@ -311,6 +318,8 @@ class MetadataSyncService:
                     session,
                     source,
                     trigger_type=trigger_type,
+                    db_name=db_name,
+                    table_name=table_name,
                 )
                 await session.commit()
                 return result
@@ -326,8 +335,11 @@ class MetadataSyncService:
         source: DataSource,
         *,
         trigger_type: str,
+        db_name: str | None,
+        table_name: str | None,
     ) -> SyncResult:
         started_at = datetime.now(UTC)
+        manual_scope = _manual_scope_rule(db_name, table_name)
         collector = self._collector_factory(
             source.db_type,
             DataSourceConfig(
@@ -353,6 +365,7 @@ class MetadataSyncService:
                 source.include_rules or [],
                 source.exclude_rules or [],
             )
+            and _matches_manual_scope(database.name, None, manual_scope)
         ]
         table_rows: list[dict[str, Any]] = []
         column_rows: list[dict[str, Any]] = []
@@ -374,6 +387,7 @@ class MetadataSyncService:
                     source.include_rules or [],
                     source.exclude_rules or [],
                 )
+                and _matches_manual_scope(table.db_name, table.table_name, manual_scope)
             ]
             table_urns = {
                 (table.db_name, table.table_name): _table_urn(
@@ -607,6 +621,27 @@ def _matches_rule(rule: dict[str, Any], db_name: str, table_name: str | None) ->
     if table_pattern_value is None:
         return table_name is None or "table" not in rule
     return table_name is not None and fnmatch.fnmatchcase(table_name, str(table_pattern_value))
+
+
+def _manual_scope_rule(db_name: str | None, table_name: str | None) -> dict[str, str] | None:
+    if db_name is None and table_name is None:
+        return None
+    rule = {"db": db_name or "*"}
+    if table_name is not None:
+        rule["table"] = table_name
+    return rule
+
+
+def _matches_manual_scope(
+    db_name: str,
+    table_name: str | None,
+    manual_scope: dict[str, str] | None,
+) -> bool:
+    if manual_scope is None:
+        return True
+    if table_name is None and "table" in manual_scope:
+        return _matches_database_rule(manual_scope, db_name)
+    return _matches_rule(manual_scope, db_name, table_name)
 
 
 def _chunked(rows: list[dict[str, Any]], size: int) -> Iterable[list[dict[str, Any]]]:

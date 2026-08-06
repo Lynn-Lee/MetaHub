@@ -438,6 +438,31 @@ async def test_sync_source_keeps_databases_when_include_rule_is_table_only() -> 
     ]
 
 
+async def test_sync_source_can_be_manually_scoped_to_one_table() -> None:
+    source = _source(include_rules=[], exclude_rules=[])
+    session = FakeSession(source)
+    writer = RecordingWriter()
+    run_recorder = RecordingRunRecorder()
+    service = MetadataSyncService(
+        session_factory=lambda: _session_factory(session),
+        collector_factory=lambda db_type, config: FakeCollector(config, started=[]),
+        credential_decrypter=lambda cipher: cipher,
+        lock=InMemorySourceLock(),
+        writer=writer,
+        change_logger=RecordingChangeLogger(),
+        run_recorder=run_recorder,
+    )
+
+    result = await service.sync_source(source.id, db_name="sales", table_name="orders")
+
+    assert result.status == "SUCCESS"
+    assert result.scanned_databases == 1
+    assert writer.table_urns == ["mysql:crm:sales:orders"]
+    assert writer.column_urns == ["mysql:crm:sales:orders:pay_amount"]
+    assert run_recorder.calls[0]["trigger_type"] == "MANUAL"
+    assert session.commits == 1
+
+
 async def test_sqlalchemy_writer_uses_batched_postgresql_on_conflict_upserts() -> None:
     session = RecordingSQLSession()
     writer = SQLAlchemyMetadataWriter(batch_size=1)
