@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.urns import ColumnUrn, TableUrn
+
 
 class FieldAnnotationPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -21,7 +23,7 @@ class FieldAnnotationPayload(BaseModel):
 
 
 class BatchFieldAnnotationPayload(BaseModel):
-    urn: str
+    urn: ColumnUrn
     annotation: FieldAnnotationPayload
 
 
@@ -30,7 +32,7 @@ class TableFieldAnnotationsPayload(BaseModel):
 
 
 class FieldAnnotationOut(BaseModel):
-    urn: str
+    urn: ColumnUrn
     asset_type: str
     domain_id: int | None
     business_meaning: str | None
@@ -52,5 +54,5 @@ class FieldAnnotationOut(BaseModel):
 
 
 class TableFieldAnnotationsOut(BaseModel):
-    table_urn: str
+    table_urn: TableUrn
     items: list[FieldAnnotationOut]

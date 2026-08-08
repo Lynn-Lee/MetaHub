@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -75,3 +76,51 @@ def test_table_batch_annotation_endpoint_returns_per_field_errors_without_db_wri
             "message": "标注接口不允许写入采集层字段",
         }
     ]
+
+
+@pytest.mark.parametrize("method", ["get", "put", "delete"])
+def test_field_annotation_endpoint_rejects_invalid_urn_query_with_422(method: str) -> None:
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(annotations.router)
+    app.dependency_overrides[get_web_session] = fake_session
+    client = TestClient(app)
+
+    response = client.request(
+        method.upper(),
+        "/annotations/field",
+        params={"urn": "mysql:crm:sales:orders/pay_amount"},
+        json={"business_meaning": "订单支付金额"} if method == "put" else None,
+    )
+
+    assert response.status_code == 422
+
+
+def test_table_batch_annotation_endpoint_rejects_invalid_table_urn_query_with_422() -> None:
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(annotations.router)
+    app.dependency_overrides[get_web_session] = fake_session
+    client = TestClient(app)
+
+    response = client.put(
+        "/annotations/table/fields",
+        params={"table_urn": "mysql:crm:sales:orders:pay_amount"},
+        json={
+            "items": [
+                {
+                    "urn": "mysql:crm:sales:orders:pay_amount",
+                    "annotation": {"business_meaning": "订单支付金额"},
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_annotation_routes_keep_urns_out_of_path_parameters() -> None:
+    route_paths = {route.path for route in annotations.router.routes}
+
+    assert "/annotations/field/{urn}" not in route_paths
+    assert all("{urn}" not in path and "{table_urn}" not in path for path in route_paths)

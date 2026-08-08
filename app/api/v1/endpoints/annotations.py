@@ -2,7 +2,7 @@
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Response, status
+from fastapi import APIRouter, Body, Depends, Query, Response, status
 from pydantic import ValidationError
 
 from app.core.exceptions import AnnotationBatchError, AnnotationReadonlyFieldError, MetaHubError
@@ -13,6 +13,7 @@ from app.schemas.annotations import (
     TableFieldAnnotationsOut,
     TableFieldAnnotationsPayload,
 )
+from app.schemas.urns import ColumnUrn, TableUrn
 from app.services.annotations import AnnotationSession, SQLAlchemyAnnotationService
 
 router = APIRouter(prefix="/annotations", tags=["annotations"])
@@ -43,7 +44,7 @@ _COLLECTION_FIELDS = {
 
 @router.get("/field", response_model=FieldAnnotationOut, summary="读取单字段标注")
 async def get_field_annotation(
-    urn: str,
+    urn: Annotated[ColumnUrn, Query(description="字段 URN")],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> FieldAnnotationOut:
     service = SQLAlchemyAnnotationService()
@@ -52,7 +53,7 @@ async def get_field_annotation(
 
 @router.put("/field", response_model=FieldAnnotationOut, summary="创建或更新单字段标注")
 async def upsert_field_annotation(
-    urn: str,
+    urn: Annotated[ColumnUrn, Query(description="字段 URN")],
     raw_payload: Annotated[dict[str, Any], Body(...)],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> FieldAnnotationOut:
@@ -71,7 +72,7 @@ async def upsert_field_annotation(
     summary="表内批量标注字段",
 )
 async def upsert_table_field_annotations(
-    table_urn: str,
+    table_urn: Annotated[TableUrn, Query(description="表 URN")],
     raw_payload: Annotated[dict[str, Any], Body(...)],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> TableFieldAnnotationsOut:
@@ -86,7 +87,7 @@ async def upsert_table_field_annotations(
 
 @router.delete("/field", status_code=status.HTTP_204_NO_CONTENT, summary="删除单字段标注")
 async def delete_field_annotation(
-    urn: str,
+    urn: Annotated[ColumnUrn, Query(description="字段 URN")],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> Response:
     service = SQLAlchemyAnnotationService()
