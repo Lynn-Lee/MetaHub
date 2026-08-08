@@ -2,11 +2,66 @@
 
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import JsonSchemaValue
 
 from app.schemas.urns import ColumnUrn, TableUrn
 
 T = TypeVar("T")
+
+DATA_SOURCE_OUT_EXAMPLE: JsonSchemaValue = {
+    "id": 1,
+    "code": "crm-prod",
+    "name": "CRM 生产库",
+    "db_type": "mysql",
+    "env": "prod",
+    "host": "crm-db.internal",
+    "port": 3306,
+    "default_db": "sales",
+    "group_name": "CRM",
+    "enabled": True,
+}
+TABLE_OUT_EXAMPLE: JsonSchemaValue = {
+    "urn": "mysql:crm:sales:orders",
+    "source_id": 1,
+    "db_name": "sales",
+    "table_name": "orders",
+    "table_type": "TABLE",
+    "table_comment": "订单表",
+    "row_count": 1200,
+    "data_size": 4096,
+    "dw_layer": None,
+    "is_deleted": False,
+    "score": 0.93,
+}
+COLUMN_OUT_EXAMPLE: JsonSchemaValue = {
+    "urn": "mysql:crm:sales:orders:pay_amount",
+    "table_urn": "mysql:crm:sales:orders",
+    "source_id": 1,
+    "db_name": "sales",
+    "table_name": "orders",
+    "column_name": "pay_amount",
+    "ordinal": 3,
+    "raw_type": "decimal(12,2)",
+    "logical_type": "decimal",
+    "raw_comment": "支付金额",
+    "is_nullable": False,
+    "is_primary_key": False,
+    "is_deleted": False,
+    "business_meaning": "订单支付金额",
+    "effective_type": "decimal",
+    "effective_domain_id": 10,
+    "domain_name": "交易域",
+    "score": 0.91,
+}
+FIELD_SEARCH_GROUP_OUT_EXAMPLE: JsonSchemaValue = {
+    "table_urn": "mysql:crm:sales:orders",
+    "source_id": 1,
+    "db_name": "sales",
+    "table_name": "orders",
+    "max_score": 0.91,
+    "columns": [COLUMN_OUT_EXAMPLE],
+}
 
 
 class MetadataPage(BaseModel, Generic[T]):
@@ -17,6 +72,8 @@ class MetadataPage(BaseModel, Generic[T]):
 
 
 class DataSourceOut(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": DATA_SOURCE_OUT_EXAMPLE})
+
     id: int
     code: str
     name: str
@@ -30,6 +87,8 @@ class DataSourceOut(BaseModel):
 
 
 class TableOut(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": TABLE_OUT_EXAMPLE})
+
     urn: TableUrn
     source_id: int
     db_name: str
@@ -44,6 +103,8 @@ class TableOut(BaseModel):
 
 
 class ColumnOut(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": COLUMN_OUT_EXAMPLE})
+
     urn: ColumnUrn
     table_urn: TableUrn
     source_id: int | None = None
@@ -65,12 +126,24 @@ class ColumnOut(BaseModel):
 
 
 class TableDdlOut(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "urn": "mysql:crm:sales:orders",
+                "ddl": 'CREATE TABLE "orders" (\n  "pay_amount" decimal(12,2) NOT NULL\n);',
+                "total": 1,
+            }
+        }
+    )
+
     urn: TableUrn
     ddl: str
     total: int = 1
 
 
 class FieldSearchGroupOut(BaseModel):
+    model_config = ConfigDict(json_schema_extra={"example": FIELD_SEARCH_GROUP_OUT_EXAMPLE})
+
     table_urn: TableUrn
     source_id: int
     db_name: str
@@ -80,6 +153,19 @@ class FieldSearchGroupOut(BaseModel):
 
 
 class SearchOut(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "query": "订单",
+                "total": 2,
+                "page": 1,
+                "page_size": 20,
+                "tables": [TABLE_OUT_EXAMPLE],
+                "field_groups": [FIELD_SEARCH_GROUP_OUT_EXAMPLE],
+            }
+        }
+    )
+
     query: str
     total: int = Field(ge=0)
     page: int = Field(ge=1)

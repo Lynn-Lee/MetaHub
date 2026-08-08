@@ -4,12 +4,26 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import JsonSchemaValue
 
 from app.schemas.urns import ColumnUrn, TableUrn
 
+FIELD_ANNOTATION_PAYLOAD_EXAMPLE: JsonSchemaValue = {
+    "business_meaning": "订单支付金额",
+    "domain_id": 10,
+    "logical_type_override": "decimal",
+    "sample_value": "99.90",
+    "source_desc": "来自订单支付链路",
+    "usage_note": "用于订单金额统计与对账",
+    "owner_id": 1001,
+}
+
 
 class FieldAnnotationPayload(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(
+        extra="ignore",
+        json_schema_extra={"example": FIELD_ANNOTATION_PAYLOAD_EXAMPLE},
+    )
 
     business_meaning: str = Field(min_length=1, max_length=4000)
     domain_id: int | None = None
@@ -28,6 +42,19 @@ class BatchFieldAnnotationPayload(BaseModel):
 
 
 class TableFieldAnnotationsPayload(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "items": [
+                    {
+                        "urn": "mysql:crm:sales:orders:pay_amount",
+                        "annotation": FIELD_ANNOTATION_PAYLOAD_EXAMPLE,
+                    }
+                ]
+            }
+        }
+    )
+
     items: list[BatchFieldAnnotationPayload] = Field(min_length=1)
 
 

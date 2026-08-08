@@ -42,19 +42,49 @@ _COLLECTION_FIELDS = {
 }
 
 
-@router.get("/field", response_model=FieldAnnotationOut, summary="读取单字段标注")
+@router.get(
+    "/field",
+    response_model=FieldAnnotationOut,
+    summary="读取单字段标注",
+    description="按字段 URN 读取人工标注。URN 一律通过 query 参数传递，不放在 path 中。",
+)
 async def get_field_annotation(
-    urn: Annotated[ColumnUrn, Query(description="字段 URN")],
+    urn: Annotated[
+        ColumnUrn,
+        Query(description="字段 URN", examples=["mysql:crm:sales:orders:pay_amount"]),
+    ],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> FieldAnnotationOut:
     service = SQLAlchemyAnnotationService()
     return await service.get_field_annotation(session, urn=urn)
 
 
-@router.put("/field", response_model=FieldAnnotationOut, summary="创建或更新单字段标注")
+@router.put(
+    "/field",
+    response_model=FieldAnnotationOut,
+    summary="创建或更新单字段标注",
+    description=(
+        "创建或更新一个字段的业务标注，并写入 annotation_history。"
+        "请求体只允许业务语义字段，raw_type、column_name 等采集层字段会返回 400。"
+    ),
+)
 async def upsert_field_annotation(
-    urn: Annotated[ColumnUrn, Query(description="字段 URN")],
-    raw_payload: Annotated[dict[str, Any], Body(...)],
+    urn: Annotated[
+        ColumnUrn,
+        Query(description="字段 URN", examples=["mysql:crm:sales:orders:pay_amount"]),
+    ],
+    raw_payload: Annotated[
+        dict[str, Any],
+        Body(
+            ...,
+            openapi_examples={
+                "field_annotation": {
+                    "summary": "标注订单支付金额字段",
+                    "value": FieldAnnotationPayload.model_config["json_schema_extra"]["example"],
+                }
+            },
+        ),
+    ],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> FieldAnnotationOut:
     _reject_collection_fields(raw_payload)
@@ -70,10 +100,30 @@ async def upsert_field_annotation(
     "/table/fields",
     response_model=TableFieldAnnotationsOut,
     summary="表内批量标注字段",
+    description=(
+        "一次提交同一张表内多个字段的业务标注。任一字段失败时整体回滚，"
+        "并通过 METAHUB-3003 返回逐字段错误。"
+    ),
 )
 async def upsert_table_field_annotations(
-    table_urn: Annotated[TableUrn, Query(description="表 URN")],
-    raw_payload: Annotated[dict[str, Any], Body(...)],
+    table_urn: Annotated[
+        TableUrn,
+        Query(description="表 URN", examples=["mysql:crm:sales:orders"]),
+    ],
+    raw_payload: Annotated[
+        dict[str, Any],
+        Body(
+            ...,
+            openapi_examples={
+                "table_field_annotations": {
+                    "summary": "批量标注订单表字段",
+                    "value": TableFieldAnnotationsPayload.model_config["json_schema_extra"][
+                        "example"
+                    ],
+                }
+            },
+        ),
+    ],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> TableFieldAnnotationsOut:
     payload = _parse_table_field_annotations_payload(raw_payload)
@@ -85,9 +135,17 @@ async def upsert_table_field_annotations(
     )
 
 
-@router.delete("/field", status_code=status.HTTP_204_NO_CONTENT, summary="删除单字段标注")
+@router.delete(
+    "/field",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除单字段标注",
+    description="按字段 URN 删除人工标注，并在删除前写入 annotation_history。",
+)
 async def delete_field_annotation(
-    urn: Annotated[ColumnUrn, Query(description="字段 URN")],
+    urn: Annotated[
+        ColumnUrn,
+        Query(description="字段 URN", examples=["mysql:crm:sales:orders:pay_amount"]),
+    ],
     session: Annotated[AnnotationSession, Depends(get_web_session)],
 ) -> Response:
     service = SQLAlchemyAnnotationService()
