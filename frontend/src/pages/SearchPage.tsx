@@ -15,6 +15,7 @@ import {
   Typography,
 } from "antd";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
 import { search, type ColumnHit, type FieldSearchGroup, type TableHit } from "@/api/search";
@@ -66,9 +67,11 @@ function TableHitItem({ hit, keyword }: { hit: TableHit; keyword: string }) {
       <List.Item.Meta
         title={
           <Space size="small" wrap>
-            <Typography.Text strong>
-              <Highlight text={hit.table_name} keyword={keyword} />
-            </Typography.Text>
+            <Link to={`/tables/${encodeURIComponent(hit.urn)}`}>
+              <Typography.Text strong>
+                <Highlight text={hit.table_name} keyword={keyword} />
+              </Typography.Text>
+            </Link>
             <Tag>{hit.table_type}</Tag>
             {hit.dw_layer && <Tag color="blue">{hit.dw_layer}</Tag>}
           </Space>
@@ -126,7 +129,9 @@ function FieldGroupCard({ group, keyword }: { group: FieldSearchGroup; keyword: 
       style={{ marginBottom: 12 }}
       title={
         <Space size="small" wrap>
-          <Typography.Text strong>{group.table_name}</Typography.Text>
+          <Link to={`/tables/${encodeURIComponent(group.table_urn)}`}>
+            <Typography.Text strong>{group.table_name}</Typography.Text>
+          </Link>
           <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>
             {group.db_name} · {group.table_urn}
           </Typography.Text>
