@@ -79,7 +79,7 @@ jobs:
         run: pytest -v --strict-markers
 
       # ── 质量门禁（DEV-TASKS §6）───────────────────────────
-      # 这些测试不允许 skip：G1 注释静默丢失、G2/G3 采集角色权限。
-      # 随对应任务（T2.4 / T8.3）实现后，下面这步会真正生效。
+      # 这些测试不允许 skip：G1 注释静默丢失（T2.4）、G2/G3 采集角色权限（T8.3）。
+      # G1/G2/G3 均已实现并在此强制执行。
       - name: 质量门禁
         run: ./scripts/run-gate-tests.sh
