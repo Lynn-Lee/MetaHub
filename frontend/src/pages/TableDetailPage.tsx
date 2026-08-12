@@ -1,11 +1,13 @@
-import { ArrowLeftOutlined } from "@ant-design/icons";
-import { useQuery } from "@tanstack/react-query";
+import { ArrowLeftOutlined, EditOutlined } from "@ant-design/icons";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
+  App,
   Button,
   Card,
   Descriptions,
   Empty,
+  Input,
   Space,
   Spin,
   Table,
@@ -15,9 +17,15 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
+import {
+  getFieldAnnotation,
+  mergeAnnotationPayload,
+  upsertFieldAnnotation,
+  type FieldAnnotationOut,
+} from "@/api/annotations";
 import { ApiError } from "@/api/client";
 import { getTable, getTableDdl, listColumns, type ColumnMeta } from "@/api/tables";
 
@@ -59,7 +67,8 @@ function EllipsisCell({ text }: { text: string | null }) {
   );
 }
 
-const COLUMN_DEFS: ColumnsType<ColumnMeta> = [
+// 非编辑列固定列宽 + Tooltip 截断，避免长文本撑破布局。
+const STATIC_COLUMNS: ColumnsType<ColumnMeta> = [
   {
     title: "#",
     dataIndex: "ordinal",
@@ -99,29 +108,138 @@ const COLUMN_DEFS: ColumnsType<ColumnMeta> = [
     render: (nullable: boolean) =>
       nullable ? <Tag>可空</Tag> : <Tag color="blue">非空</Tag>,
   },
-  {
-    title: "业务含义",
-    key: "meaning",
-    width: 280,
-    render: (_, record) => <EllipsisCell text={record.business_meaning ?? record.raw_comment} />,
-  },
-  {
-    title: "数据域",
-    dataIndex: "domain_name",
-    key: "domain_name",
-    width: 140,
-    render: (domain: string | null) =>
-      domain ? <Tag color="purple">{domain}</Tag> : <Typography.Text type="secondary">—</Typography.Text>,
-  },
 ];
 
+const DOMAIN_COLUMN: ColumnsType<ColumnMeta>[number] = {
+  title: "数据域",
+  dataIndex: "domain_name",
+  key: "domain_name",
+  width: 140,
+  render: (domain: string | null) =>
+    domain ? (
+      <Tag color="purple">{domain}</Tag>
+    ) : (
+      <Typography.Text type="secondary">—</Typography.Text>
+    ),
+};
+
 function ColumnsTab({ tableUrn }: { tableUrn: string }) {
+  const { message } = App.useApp();
+  const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
+  const [editingUrn, setEditingUrn] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  // editingRef 始终反映最新编辑行：Tab/Enter 切换后，旧输入框迟到的 blur 靠它去重。
+  const editingRef = useRef<string | null>(null);
+  const savingRef = useRef(false);
+
   const query = useQuery({
     queryKey: ["columns", tableUrn, page],
     queryFn: () => listColumns(tableUrn, page, PAGE_SIZE),
     placeholderData: (previous) => previous,
   });
+  const rows = query.data?.items ?? [];
+
+  const mutation = useMutation({
+    mutationFn: async ({ urn, businessMeaning }: { urn: string; businessMeaning: string }) => {
+      // 先读现有标注再合并，避免整体替换 upsert 清空其他业务字段。
+      let existing: FieldAnnotationOut | null = null;
+      try {
+        existing = await getFieldAnnotation(urn);
+      } catch (err) {
+        if (!(err instanceof ApiError && err.status === 404)) {
+          throw err;
+        }
+      }
+      return upsertFieldAnnotation(urn, mergeAnnotationPayload(existing, businessMeaning));
+    },
+    onSuccess: () => {
+      // 生成列方案下，字段有效业务语义即时更新，回填后立即可搜到。
+      void queryClient.invalidateQueries({ queryKey: ["columns", tableUrn] });
+    },
+  });
+
+  const setEditing = (urn: string | null, initial = "") => {
+    editingRef.current = urn;
+    setEditingUrn(urn);
+    setDraft(initial);
+  };
+
+  const commit = async (record: ColumnMeta, moveNext: boolean) => {
+    if (editingRef.current !== record.urn || savingRef.current) {
+      return;
+    }
+    const value = draft.trim();
+    const current = record.business_meaning ?? "";
+    let ok = true;
+    if (value !== current) {
+      if (value === "") {
+        message.warning("业务含义不能为空，未保存");
+        ok = false;
+      } else {
+        savingRef.current = true;
+        try {
+          await mutation.mutateAsync({ urn: record.urn, businessMeaning: value });
+          message.success("已保存");
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : "保存失败");
+          ok = false;
+        } finally {
+          savingRef.current = false;
+        }
+      }
+    }
+    if (moveNext && ok) {
+      const index = rows.findIndex((row) => row.urn === record.urn);
+      const nextRow = rows[index + 1];
+      if (nextRow) {
+        setEditing(nextRow.urn, nextRow.business_meaning ?? "");
+        return;
+      }
+    }
+    setEditing(null);
+  };
+
+  const meaningColumn: ColumnsType<ColumnMeta>[number] = {
+    title: "业务含义",
+    key: "meaning",
+    width: 300,
+    render: (_, record) => {
+      if (editingUrn === record.urn) {
+        return (
+          <Input
+            autoFocus
+            size="small"
+            value={draft}
+            disabled={mutation.isPending}
+            onChange={(event) => setDraft(event.target.value)}
+            onPressEnter={() => void commit(record, false)}
+            onBlur={() => void commit(record, false)}
+            onKeyDown={(event) => {
+              if (event.key === "Tab") {
+                event.preventDefault();
+                void commit(record, true);
+              } else if (event.key === "Escape") {
+                setEditing(null);
+              }
+            }}
+          />
+        );
+      }
+      return (
+        <div
+          onClick={() => setEditing(record.urn, record.business_meaning ?? "")}
+          title="点击编辑业务含义"
+          style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", minWidth: 0 }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <EllipsisCell text={record.business_meaning ?? record.raw_comment} />
+          </span>
+          <EditOutlined style={{ color: "#bbb", flexShrink: 0 }} />
+        </div>
+      );
+    },
+  };
 
   if (query.isError) {
     return (
@@ -144,10 +262,10 @@ function ColumnsTab({ tableUrn }: { tableUrn: string }) {
       rowKey="urn"
       size="middle"
       loading={query.isLoading}
-      columns={COLUMN_DEFS}
-      dataSource={query.data?.items ?? []}
+      columns={[...STATIC_COLUMNS, meaningColumn, DOMAIN_COLUMN]}
+      dataSource={rows}
       tableLayout="fixed"
-      scroll={{ x: 910 }}
+      scroll={{ x: 930 }}
       pagination={{
         current: query.data?.page ?? page,
         pageSize: query.data?.page_size ?? PAGE_SIZE,
