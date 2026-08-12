@@ -15,6 +15,7 @@ dependencies = [
     "loguru>=0.7",
     "redis>=5.2",
     "cryptography>=43.0",
+    "pyjwt>=2.9",
     "apscheduler>=3.11",
     # 采集器驱动：V0.1 只需 MySQL（PostgreSQL 复用 asyncpg）
     "pymysql>=1.1",

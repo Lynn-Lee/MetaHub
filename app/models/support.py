@@ -152,6 +152,8 @@ class SysUser(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     real_name: Mapped[str | None] = mapped_column(String(64))
     email: Mapped[str | None] = mapped_column(String(128))
+    # V0.1 简单登录的本地密码哈希（pbkdf2）。SSO/LDAP 用户此列为空，见 DEV-TASKS T8.4。
+    password_hash: Mapped[str | None] = mapped_column(String(255))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

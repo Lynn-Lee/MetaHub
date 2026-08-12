@@ -1,9 +1,10 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import annotations, health, metadata_queries
+from app.api.v1.endpoints import annotations, auth, health, metadata_queries
 
 api_router = APIRouter()
 api_router.include_router(health.router)
+api_router.include_router(auth.router)
 api_router.include_router(annotations.router)
 api_router.include_router(metadata_queries.router)
 
