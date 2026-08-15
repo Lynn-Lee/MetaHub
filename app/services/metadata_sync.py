@@ -17,12 +17,12 @@ from decimal import Decimal
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
-from cryptography.fernet import Fernet
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
 
 from app.collectors import BaseCollector, DataSourceConfig, get_collector
 from app.core.config import get_settings
+from app.core.credentials import decrypt_credential
 from app.db.session import collector_session
 from app.models.metadata import ColumnMeta, DataSource, IndexMeta, TableMeta
 from app.services.schema_diff import SQLAlchemySchemaChangeLogger
@@ -287,7 +287,7 @@ class MetadataSyncService:
         effective_batch_size = batch_size or settings.SYNC_BATCH_SIZE
         self._session_factory = session_factory or cast(SessionFactory, collector_session)
         self._collector_factory = collector_factory
-        self._credential_decrypter = credential_decrypter or _decrypt_credential
+        self._credential_decrypter = credential_decrypter or decrypt_credential
         self._lock = lock or RedisPostgresSourceLock(ttl_seconds=settings.SYNC_LOCK_TTL_SECONDS)
         self._writer = writer or SQLAlchemyMetadataWriter(batch_size=effective_batch_size)
         self._change_logger = change_logger or SQLAlchemySchemaChangeLogger(
@@ -664,8 +664,3 @@ def _decode_redis_value(value: object) -> str | None:
     if isinstance(value, bytes):
         return value.decode()
     return str(value)
-
-
-def _decrypt_credential(cipher_text: str) -> str:
-    key = get_settings().CREDENTIAL_SECRET_KEY.encode()
-    return Fernet(key).decrypt(cipher_text.encode()).decode()
