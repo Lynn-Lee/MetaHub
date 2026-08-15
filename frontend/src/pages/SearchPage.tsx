@@ -1,15 +1,11 @@
 import { SearchOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Alert,
-  Button,
   Card,
-  Empty,
   Input,
   List,
   Pagination,
   Space,
-  Spin,
   Tabs,
   Tag,
   Typography,
@@ -17,7 +13,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { ApiError } from "@/api/client";
+import { EmptyState, ErrorState, LoadingState } from "@/components/QueryStates";
 import { search, type ColumnHit, type FieldSearchGroup, type TableHit } from "@/api/search";
 
 const PAGE_SIZE = 20;
@@ -178,38 +174,20 @@ export default function SearchPage() {
   const renderResults = () => {
     // 空态之一：查询词不足。
     if (!enabled) {
-      return (
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={`请输入至少 ${MIN_QUERY_LENGTH} 个字符开始搜索`}
-        />
-      );
+      return <EmptyState description={`请输入至少 ${MIN_QUERY_LENGTH} 个字符开始搜索`} />;
     }
     // 加载态。
     if (query.isLoading) {
-      return (
-        <div style={{ textAlign: "center", padding: "48px 0" }}>
-          <Spin />
-        </div>
-      );
+      return <LoadingState />;
     }
-    // 错误态（含无权限）。
+    // 错误态 / 无权限态。
     if (query.isError) {
-      const err = query.error;
-      const isForbidden = err instanceof ApiError && err.status === 403;
       return (
-        <Alert
-          type={isForbidden ? "warning" : "error"}
-          showIcon
-          message={isForbidden ? "无权限访问搜索" : "搜索失败"}
-          description={err instanceof Error ? err.message : "请稍后重试"}
-          action={
-            !isForbidden && (
-              <Button size="small" onClick={() => void query.refetch()}>
-                重试
-              </Button>
-            )
-          }
+        <ErrorState
+          error={query.error}
+          onRetry={() => void query.refetch()}
+          forbiddenMessage="无权限访问搜索"
+          errorMessage="搜索失败"
         />
       );
     }
@@ -218,7 +196,7 @@ export default function SearchPage() {
     }
     // 空结果态。
     if (data.total === 0) {
-      return <Empty description={`未找到与「${keyword}」匹配的结果`} />;
+      return <EmptyState simple={false} description={`未找到与「${keyword}」匹配的结果`} />;
     }
 
     return (
@@ -239,7 +217,7 @@ export default function SearchPage() {
                     )}
                   />
                 ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本页无表命中" />
+                  <EmptyState description="本页无表命中" />
                 ),
             },
             {
@@ -251,7 +229,7 @@ export default function SearchPage() {
                     <FieldGroupCard key={group.table_urn} group={group} keyword={keyword} />
                   ))
                 ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本页无字段命中" />
+                  <EmptyState description="本页无字段命中" />
                 ),
             },
           ]}

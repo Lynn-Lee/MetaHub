@@ -1,15 +1,12 @@
 import { ArrowLeftOutlined, EditOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Alert,
   App,
   Button,
   Card,
   Descriptions,
-  Empty,
   Input,
   Space,
-  Spin,
   Table,
   Tabs,
   Tag,
@@ -27,6 +24,7 @@ import {
   type FieldAnnotationOut,
 } from "@/api/annotations";
 import { ApiError } from "@/api/client";
+import { EmptyState, ErrorState, LoadingState } from "@/components/QueryStates";
 import { getTable, getTableDdl, listColumns, type ColumnMeta } from "@/api/tables";
 
 const PAGE_SIZE = 50;
@@ -243,16 +241,11 @@ function ColumnsTab({ tableUrn }: { tableUrn: string }) {
 
   if (query.isError) {
     return (
-      <Alert
-        type="error"
-        showIcon
-        message="字段加载失败"
-        description={query.error instanceof Error ? query.error.message : "请稍后重试"}
-        action={
-          <Button size="small" onClick={() => void query.refetch()}>
-            重试
-          </Button>
-        }
+      <ErrorState
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        forbiddenMessage="无权限访问该表字段"
+        errorMessage="字段加载失败"
       />
     );
   }
@@ -286,24 +279,15 @@ function DdlTab({ tableUrn, active }: { tableUrn: string; active: boolean }) {
   });
 
   if (query.isLoading) {
-    return (
-      <div style={{ textAlign: "center", padding: "48px 0" }}>
-        <Spin />
-      </div>
-    );
+    return <LoadingState />;
   }
   if (query.isError) {
     return (
-      <Alert
-        type="error"
-        showIcon
-        message="DDL 生成失败"
-        description={query.error instanceof Error ? query.error.message : "请稍后重试"}
-        action={
-          <Button size="small" onClick={() => void query.refetch()}>
-            重试
-          </Button>
-        }
+      <ErrorState
+        error={query.error}
+        onRetry={() => void query.refetch()}
+        forbiddenMessage="无权限查看该表 DDL"
+        errorMessage="DDL 生成失败"
       />
     );
   }
@@ -341,41 +325,28 @@ export default function TableDetailPage() {
   });
 
   if (tableQuery.isLoading) {
-    return (
-      <div style={{ textAlign: "center", padding: "64px 0" }}>
-        <Spin size="large" />
-      </div>
-    );
+    return <LoadingState size="large" padding={64} />;
   }
 
   const table = tableQuery.data?.items[0];
 
-  // 错误态 / 不存在态：403 无权限，其余含空 items 归为“表不存在”。
+  // 错误态 / 无权限态 / 不存在（空）态：403 无权限，其余错误可重试，空 items 归为“表不存在”。
   if (tableQuery.isError || !table) {
-    const err = tableQuery.error;
-    const isForbidden = err instanceof ApiError && err.status === 403;
     return (
       <Card>
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Link to="/search">
             <Button icon={<ArrowLeftOutlined />}>返回搜索</Button>
           </Link>
-          {isForbidden ? (
-            <Alert type="warning" showIcon message="无权限访问该表" />
-          ) : tableQuery.isError ? (
-            <Alert
-              type="error"
-              showIcon
-              message="加载失败"
-              description={err instanceof Error ? err.message : "请稍后重试"}
-              action={
-                <Button size="small" onClick={() => void tableQuery.refetch()}>
-                  重试
-                </Button>
-              }
+          {tableQuery.isError ? (
+            <ErrorState
+              error={tableQuery.error}
+              onRetry={() => void tableQuery.refetch()}
+              forbiddenMessage="无权限访问该表"
+              errorMessage="加载失败"
             />
           ) : (
-            <Empty description={`未找到表「${urn}」`} />
+            <EmptyState simple={false} description={`未找到表「${urn}」`} />
           )}
         </Space>
       </Card>
